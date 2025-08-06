@@ -8,7 +8,7 @@
 
   outputs = { nixpkgs, impermanence, ... }@inputs:
     let
-      secrets = import ./secrets.nix;
+      secrets = import /etc/secrets/config/secrets.nix;
     in
     {
       nixosConfigurations.${secrets.hostname} = nixpkgs.lib.nixosSystem {

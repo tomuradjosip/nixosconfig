@@ -6,11 +6,11 @@
 }:
 
 let
-  secrets = import ./secrets.nix;
+  secrets = import /etc/secrets/config/secrets.nix;
 in
 {
   imports = [
-    ./hardware-configuration.nix
+    /etc/secrets/config/hardware-configuration.nix
     ./modules/storage.nix
     ./modules/networking.nix
     ./modules/users.nix

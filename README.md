@@ -154,15 +154,21 @@ sudo mount ${DISK1}-part1 /mnt/boot
 
 2. **Create your secrets file**:
    ```bash
-   cd /mnt/persist/home/$USERNAME/nixosconfig
-   sudo cp secrets.nix.template secrets.nix
-   sudo chown 1000:1000 secrets.nix
+   # Create the secrets directory
+   sudo mkdir -p /etc/secrets/config/
+
+   # Copy template to the proper location
+   sudo cp /mnt/persist/home/$USERNAME/nixosconfig/secrets.nix.template /etc/secrets/config/secrets.nix
+
+   # Set secure permissions
+   sudo chmod 600 /etc/secrets/config/secrets.nix
+   sudo chown root:root /etc/secrets/config/secrets.nix
    ```
 
-3. **Edit `secrets.nix`** with your information:
+3. **Edit `/etc/secrets/config/secrets.nix`** with your information:
    ```bash
-   # Edit the secrets file (use nano, vim, or your preferred editor)
-   sudo nano secrets.nix
+   # Edit the secrets file
+   sudo vi /etc/secrets/config/secrets.nix
    ```
    - Replace `your-username` with your chosen username
    - Replace `your-hostname` with your chosen hostname
@@ -188,14 +194,28 @@ sudo mount ${DISK1}-part1 /mnt/boot
    sudo chmod 600 /mnt/persist/etc/secrets/passwords/*
    ```
 
-## Step 9: Install NixOS
+## Step 9: Generate Hardware Configuration
+
+```bash
+# Generate hardware configuration
+sudo nixos-generate-config --root /mnt
+
+# Copy the generated hardware configuration to the secrets directory
+sudo cp /mnt/etc/nixos/hardware-configuration.nix /etc/secrets/config/hardware-configuration.nix
+
+# Set secure permissions
+sudo chmod 600 /etc/secrets/config/hardware-configuration.nix
+sudo chown root:root /etc/secrets/config/hardware-configuration.nix
+```
+
+## Step 10: Install NixOS
 
 ```bash
 # Install using your flake configuration
 sudo nixos-install --flake /mnt/persist/home/$USERNAME/nixosconfig#$HOSTNAME --root /mnt
 ```
 
-## Step 10: Reboot and Verify
+## Step 11: Reboot and Verify
 
 1. **Clean unmount and reboot**:
    ```bash

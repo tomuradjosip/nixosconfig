@@ -26,6 +26,8 @@ Before starting, ensure you have:
 2. Boot from the USB drive
 3. Connect to the internet:
    ```bash
+   # For Ethernet, it should connect automatically
+
    # For WiFi:
    sudo systemctl start wpa_supplicant
    sudo wpa_cli
@@ -34,13 +36,11 @@ Before starting, ensure you have:
    > set_network 0 psk "Your-WiFi-Password"
    > enable_network 0
    > quit
-
-   # For Ethernet, it should connect automatically
    ```
 
 ## Step 2: Enable SSH Access (Optional but Recommended)
 
-For easier installation (copy/paste commands, remote assistance):
+For easier installation (copy/paste commands):
 
 ```bash
 # Set password for the nixos user

@@ -1,0 +1,228 @@
+{
+  "$schema": "https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/schema.json",
+  "palette": {
+    "blue": "#8CAAEE",
+    "closer": "p:os",
+    "lavender": "#BABBF1",
+    "os": "#ACB0BE",
+    "peach": "#ef9f76",
+    "pink": "#F4B8E4",
+    "sky": "#99d1db"
+  },
+  "transient_prompt": {
+    "template": "<p:blue>\ue641 {{now | date \"15:04:05\"}}</> \uf054 ",
+    "foreground": "p:lavender"
+  },
+  "blocks": [
+    {
+      "type": "prompt",
+      "alignment": "left",
+      "segments": [
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": "{{.Icon}} ",
+          "foreground": "p:os",
+          "type": "os",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": "{{ .UserName }} ",
+          "foreground": "p:blue",
+          "type": "session",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "folder_icon": "..\ue5fe..",
+            "home_icon": "~",
+            "style": "full"
+          },
+          "template": "{{ .Path }} ",
+          "foreground": "p:pink",
+          "type": "path",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "branch_icon": "\ue725 ",
+            "cache_duration": "none",
+            "cherry_pick_icon": "\ue29b ",
+            "commit_icon": "\uf417 ",
+            "fetch_status": true,
+            "fetch_upstream_icon": true,
+            "merge_icon": "\ue727 ",
+            "no_commits_icon": "\uf0c3 ",
+            "rebase_icon": "\ue728 ",
+            "revert_icon": "\uf0e2 ",
+            "tag_icon": "\uf412 "
+          },
+          "template": "</>{{ .HEAD }}{{ if .Staging.Changed }}<#FF6F00> \uf046 {{ .Staging.String }}</>{{ end }}{{ if and (.Working.Changed) (.Staging.Changed) }} |{{ end }}{{ if .Working.Changed }} \uf044 {{ .Working.String }}{{ end }}{{ if gt .StashCount 0 }} \ueb4b {{ .StashCount }}{{ end }} ",
+          "foreground": "p:lavender",
+          "type": "git",
+          "style": "plain"
+        }
+      ]
+    },
+    {
+      "type": "prompt",
+      "alignment": "right",
+      "overflow": "hide",
+      "segments": [
+        {
+          "properties": {
+            "always_enabled": true,
+            "cache_duration": "none"
+          },
+          "template": " \ueba2 {{ .FormattedMs }}",
+          "foreground": "p:lavender",
+          "type": "executiontime",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": " \udb80\udcf6 {{ date \"Jan 2\" .CurrentDate }}",
+          "foreground": "p:pink",
+          "type": "time",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": " \ue641 {{ date \"15:04:05\" .CurrentDate }}",
+          "foreground": "p:blue",
+          "type": "time",
+          "style": "plain"
+        }
+      ]
+    },
+    {
+      "type": "prompt",
+      "alignment": "left",
+      "segments": [
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-profile.sh"
+          },
+          "template": "\udb80\udd63 ",
+          "foreground": "p:os",
+          "type": "command",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-profile.sh"
+          },
+          "template": "aws ",
+          "foreground": "p:blue",
+          "type": "command",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-region.sh"
+          },
+          "template": "\udb80\udde7 ",
+          "foreground": "p:lavender",
+          "type": "command",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-region.sh"
+          },
+          "template": "{{ .Output }} ",
+          "foreground": "p:pink",
+          "type": "command",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-type.sh"
+          },
+          "template": "\uea75 {{ .Output }} ",
+          "foreground": "p:lavender",
+          "type": "command",
+          "style": "plain"
+        }
+      ],
+      "newline": true
+    },
+    {
+      "type": "prompt",
+      "alignment": "right",
+      "overflow": "hide",
+      "segments": [
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-profile.sh"
+          },
+          "template": "\udb81\uddb5 {{ .Output }} </>",
+          "foreground": "p:sky",
+          "type": "command",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none",
+            "script": "$WORKDIR/.devcontainer/scripts/get-aws-timeout.sh"
+          },
+          "template": "\udb80\udd09 {{ .Output }}",
+          "foreground": "p:peach",
+          "type": "command",
+          "style": "plain"
+        }
+      ]
+    },
+    {
+      "type": "prompt",
+      "alignment": "left",
+      "segments": [
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": "\uf489",
+          "foreground": "p:os",
+          "type": "shell",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": " {{ .Name }}",
+          "foreground": "p:blue",
+          "type": "shell",
+          "style": "plain"
+        },
+        {
+          "properties": {
+            "cache_duration": "none"
+          },
+          "template": " \uf054",
+          "foreground": "p:lavender",
+          "type": "text",
+          "style": "plain"
+        }
+      ],
+      "newline": true
+    }
+  ],
+  "version": 3,
+  "final_space": true
+}

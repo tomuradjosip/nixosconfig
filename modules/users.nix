@@ -10,6 +10,7 @@
   # Root user configuration
   users.users.root = {
     hashedPasswordFile = "/persist/etc/secrets/passwords/root";
+    shell = pkgs.zsh;
   };
 
   # Disable user management outside of this module
@@ -24,6 +25,7 @@
     ];
     hashedPasswordFile = "/persist/etc/secrets/passwords/${secrets.username}";
     openssh.authorizedKeys.keys = secrets.sshKeys;
+    shell = pkgs.zsh;
   };
 
   # SSH client configuration

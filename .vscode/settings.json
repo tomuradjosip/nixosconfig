@@ -1,0 +1,9 @@
+{
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+    "editor.formatOnSave": true,
+    "[nix]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 2
+    }
+}

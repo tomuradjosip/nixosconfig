@@ -15,6 +15,7 @@ in
     ./modules/networking.nix
     ./modules/users.nix
     ./modules/packages.nix
+    ./modules/shell.nix
     ./modules/persistence.nix
     ./modules/localization.nix
   ];

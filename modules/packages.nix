@@ -16,16 +16,10 @@
     git
     nixfmt-rfc-style # For formatting nix files
     htop
+    pre-commit
+    oh-my-posh
   ];
 
   # Need this for vscode-server
   programs.nix-ld.enable = true;
-
-  # Shell configuration
-  programs.bash = {
-    shellAliases = {
-      rb = "sudo nixos-rebuild switch --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
-      rbt = "sudo nixos-rebuild test --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
-    };
-  };
 }

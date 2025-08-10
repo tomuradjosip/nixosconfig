@@ -49,12 +49,6 @@
     neededForBoot = true;
   };
 
-  # Primary ESP for systemd-boot
-  fileSystems."/boot" = lib.mkForce {
-    device = "/dev/disk/by-id/${secrets.diskIds.primary}-part1";
-    fsType = "vfat";
-  };
-
   # ESP sync service for redundancy
   systemd.services.sync-esp = {
     description = "Sync ESP partitions for redundancy";

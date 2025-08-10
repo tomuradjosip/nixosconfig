@@ -6,7 +6,8 @@
     impermanence.url = "github:nix-community/impermanence";
   };
 
-  outputs = { nixpkgs, impermanence, ... }@inputs:
+  outputs =
+    { nixpkgs, impermanence, ... }@inputs:
     let
       secrets = import /etc/secrets/config/secrets.nix;
     in

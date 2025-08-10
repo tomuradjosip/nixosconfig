@@ -274,21 +274,96 @@ To verify your redundancy works:
 - Automatic ESP synchronization
 - ZFS handles data integrity and mirroring
 - Stable device identifiers prevent boot issues
+- **True EFI failover** - UEFI automatically boots from available ESP
+
+### EFI Failover Strategy
+
+This configuration uses a **no-mount** approach for maximum reliability:
+
+#### **Boot Process**
+- **UEFI firmware** handles ESP selection automatically
+- **No `/boot` mount** during normal operation
+- **ESP only mounted** when actually needed (updates, sync)
+- **System boots** from whichever ESP is available
+
+#### **System Updates**
+- **nixos-rebuild wrapper** automatically mounts ESP with failover
+- **Tries primary ESP** first, falls back to secondary
+- **Performs system update** with mounted ESP
+- **Unmounts ESP** after completion
+- **ESP sync service** runs to keep both ESPs identical
+
+#### **Why No Permanent `/boot` Mount?**
+
+**Traditional approach problems:**
+```nix
+# This causes emergency mode if primary disk fails
+fileSystems."/boot" = {
+  device = "/dev/disk/by-id/primary-disk-part1";
+  fsType = "vfat";
+};
+```
+
+**Our approach benefits:**
+- **True failover**: UEFI boots from any available ESP
+- **No emergency mode**: System never fails due to missing `/boot`
+- **Reduced attack surface**: ESP unmounted during normal operation
+- **Cleaner separation**: Boot firmware vs. operating system concerns
 
 ### How Redundancy Works
 
-- **Primary ESP**: `/boot` mounted from first disk
-- **Secondary ESP**: Automatically synced after system updates
+- **Primary ESP**: First choice for UEFI and system updates
+- **Secondary ESP**: Automatically synced and used for failover
 - **Data mirroring**: ZFS mirrors all data across both disks
-- **Boot fallback**: UEFI can boot from either ESP if one fails
+- **Boot fallback**: UEFI automatically selects working ESP
+- **No manual intervention**: System boots normally even with disk failure
+
+### Custom nixos-rebuild Wrapper
+
+The system includes a transparent wrapper for `nixos-rebuild`:
+
+```bash
+# This command automatically:
+# 1. Mounts ESP with failover (primary → secondary)
+# 2. Runs the actual nixos-rebuild
+# 3. Unmounts ESP when complete
+sudo nixos-rebuild switch --flake .#hostname
+```
+
+**Wrapper features:**
+- **Transparent operation**: Works exactly like normal `nixos-rebuild`
+- **Automatic ESP mounting**: Handles failover logic internally
+- **Proper cleanup**: Always unmounts ESP, even on errors
+- **All options supported**: `switch`, `test`, `boot`, `build`, etc.
+- **Smart detection**: Only mounts ESP for operations that need it
 
 ### Failure Scenarios
 
 | Failure | System Response |
 |---------|----------------|
-| Disk 1 fails | Boot from Disk 2 ESP, ZFS continues with remaining disk |
-| Disk 2 fails | Continue with Disk 1 ESP, ZFS continues with remaining disk |
-| ESP corruption | Switch to backup ESP via UEFI boot menu |
+| Disk 1 fails | UEFI boots from Disk 2 ESP, ZFS continues with remaining disk |
+| Disk 2 fails | UEFI boots from Disk 1 ESP, ZFS continues with remaining disk |
+| ESP corruption | UEFI automatically tries other ESP |
+| Both ESPs fail | Manual UEFI boot menu selection required |
+| Primary disk during update | Wrapper automatically uses secondary ESP |
+
+### ESP Sync Service
+
+Automatic synchronization keeps both ESPs identical:
+
+```bash
+# Runs after every system update
+systemctl status sync-esp
+
+# Manual sync (if needed)
+sudo systemctl start sync-esp
+```
+
+**Sync behavior:**
+- **Detects available ESPs**: Works with any combination of working disks
+- **Bidirectional logic**: Syncs from whichever ESP is primary
+- **Error handling**: Gracefully handles missing or failed ESPs
+- **Automatic cleanup**: Always unmounts temporary mounts
 
 ### Device Stability
 

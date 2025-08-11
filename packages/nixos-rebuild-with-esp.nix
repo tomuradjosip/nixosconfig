@@ -2,6 +2,14 @@
 #
 # Purpose: Transparent wrapper for nixos-rebuild that handles ESP mounting automatically
 #
+# Why not mount /boot permanently?
+# Traditional approach: fileSystems."/boot" = { device = "device-id-primary-esp"; };
+# Problems:
+# - Single point of failure, system won't boot if primary ESP fails
+# - no automatic failover to secondary ESP, system will go to emergency mode
+#
+# To solve this, we mount ESP only when needed, with automatic failover
+#
 # Features:
 # - Drop-in replacement for standard nixos-rebuild command
 # - Smart operation detection (only mounts ESP when needed)

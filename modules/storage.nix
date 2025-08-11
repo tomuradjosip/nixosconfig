@@ -68,6 +68,19 @@
     ${config.systemd.package}/bin/systemctl start sync-esp.service || true
   '';
 
+  # System generation cleanup service - more intelligent than nix-collect-garbage
+  systemd.services.system-profile-cleanup = {
+    description = "Intelligent system profile cleaner";
+    startAt = "daily";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${
+        pkgs.callPackage ../packages/system-generation-cleanup.nix { }
+      }/bin/system-generation-cleanup";
+    };
+  };
+  systemd.timers.system-profile-cleanup.timerConfig.Persistent = true;
+
   # ZFS services
   services.zfs = {
     autoScrub.enable = true;

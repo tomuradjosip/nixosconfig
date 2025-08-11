@@ -23,7 +23,9 @@
     ]
     ++ [
       # Custom packages
+      (pkgs.callPackage ../packages/sync-esp.nix { inherit secrets; })
       (pkgs.callPackage ../packages/nixos-rebuild-with-esp.nix { inherit secrets; })
+      (pkgs.callPackage ../packages/system-generation-cleanup.nix { })
     ];
 
   # Need this for vscode-server

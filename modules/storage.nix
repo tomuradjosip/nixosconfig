@@ -49,6 +49,13 @@
     neededForBoot = true;
   };
 
+  # Zram swap configuration
+  zramSwap = {
+    enable = true;
+    algorithm = "lzo-rle";
+    memoryMax = 2147483648; # 2GB in bytes
+  };
+
   # ESP sync service for redundancy
   systemd.services.sync-esp = {
     description = "Sync ESP partitions for redundancy";

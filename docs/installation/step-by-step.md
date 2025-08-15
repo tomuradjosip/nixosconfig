@@ -122,8 +122,7 @@ sudo mkdir -p /mnt/{nix,persist,boot}
 sudo mount -t zfs rpool/nix /mnt/nix
 sudo mount -t zfs rpool/persist /mnt/persist
 
-# Mount primary ESP
-sudo mount ${DISK1}-part1 /mnt/boot
+# Do not mount ESP (/boot) here, we don't want it in the hardware-configuration.nix
 ```
 
 ## Step 8: Clone Configuration and Prepare Secrets
@@ -143,26 +142,26 @@ sudo git clone https://github.com/yourusername/nixosconfig.git /mnt/persist/home
 # sudo mv nixosconfig-main nixosconfig
 
 # Set proper ownership
-sudo chown -R 1000:1000 /mnt/persist/home/$USERNAME/nixosconfig
+sudo chown -R 1000:1000 /mnt/persist/home/$USERNAME
 ```
 
 ### Create Secrets Configuration
 ```bash
 # Create the secrets directory
-sudo mkdir -p /etc/secrets/config/
+sudo mkdir -p /mnt/persist/etc/secrets/config/
 
 # Copy template to the proper location
-sudo cp /mnt/persist/home/$USERNAME/nixosconfig/secrets.nix.template /etc/secrets/config/secrets.nix
+sudo cp /mnt/persist/home/$USERNAME/nixosconfig/secrets.nix.template /mnt/persist/etc/secrets/config/secrets.nix
 
 # Set secure permissions
-sudo chmod 600 /etc/secrets/config/secrets.nix
-sudo chown root:root /etc/secrets/config/secrets.nix
+sudo chmod 600 /mnt/persist/etc/secrets/config/secrets.nix
+sudo chown root:root /mnt/persist/etc/secrets/config/secrets.nix
 ```
 
 ### Edit Secrets File
 ```bash
 # Edit the secrets file
-sudo vi /etc/secrets/config/secrets.nix
+sudo vi /mnt/persist/etc/secrets/config/secrets.nix
 ```
 
 **Required changes**:
@@ -180,9 +179,11 @@ sudo vi /etc/secrets/config/secrets.nix
 sudo mkdir -p /mnt/persist/etc/secrets/passwords
 
 # Generate password hash for root
+echo "Enter root password: "
 sudo mkpasswd -m sha-512 | sudo tee /mnt/persist/etc/secrets/passwords/root
 
 # Generate password hash for your user
+echo "Enter $USERNAME password: "
 sudo mkpasswd -m sha-512 | sudo tee /mnt/persist/etc/secrets/passwords/$USERNAME
 
 # Secure the files
@@ -196,18 +197,24 @@ sudo chmod 600 /mnt/persist/etc/secrets/passwords/*
 sudo nixos-generate-config --root /mnt
 
 # Copy the generated hardware configuration to the secrets directory
-sudo cp /mnt/etc/nixos/hardware-configuration.nix /etc/secrets/config/hardware-configuration.nix
+sudo cp /mnt/etc/nixos/hardware-configuration.nix /mnt/persist/etc/secrets/config/hardware-configuration.nix
 
 # Set secure permissions
-sudo chmod 600 /etc/secrets/config/hardware-configuration.nix
-sudo chown root:root /etc/secrets/config/hardware-configuration.nix
+sudo chmod 600 /mnt/persist/etc/secrets/config/hardware-configuration.nix
+sudo chown root:root /mnt/persist/etc/secrets/config/hardware-configuration.nix
 ```
 
 ## Step 10: Install NixOS
 
 ```bash
+# Create a temporary symlink in the host environment for flake evaluation
+sudo ln -sf /mnt/persist/etc/secrets /etc/secrets
+
+# Mount primary ESP
+sudo mount ${DISK1}-part1 /mnt/boot
+
 # Install using your flake configuration
-sudo nixos-install --flake /mnt/persist/home/$USERNAME/nixosconfig#$HOSTNAME --root /mnt
+sudo nixos-install --no-root-passwd --impure --flake /mnt/persist/home/$USERNAME/nixosconfig#$HOSTNAME --root /mnt
 ```
 
 **Note**: This step may take 30-60 minutes depending on your internet connection.
@@ -219,35 +226,7 @@ sudo nixos-install --flake /mnt/persist/home/$USERNAME/nixosconfig#$HOSTNAME --r
 sudo umount /mnt/boot
 sudo umount /mnt/nix
 sudo umount /mnt/persist
-sudo umount /mnt
 sudo reboot
 ```
 
 Proceed to [First Boot Setup](first-boot.md)
-
-## Troubleshooting Installation Issues
-
-### Common Problems
-
-**ZFS pool creation fails**:
-```bash
-# Check if disks are busy
-sudo lsof /dev/disk/by-id/your-disk-*
-
-# Force creation if needed
-sudo zpool create -f ...
-```
-
-**Mount errors**:
-```bash
-# Check filesystem status
-sudo zpool status
-sudo zfs list
-```
-
-**Network issues during installation**:
-```bash
-# Restart network
-sudo systemctl restart systemd-networkd
-sudo systemctl restart NetworkManager
-```

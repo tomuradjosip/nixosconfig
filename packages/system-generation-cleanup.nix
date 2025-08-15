@@ -58,7 +58,7 @@ pkgs.writeShellApplication {
     totalRemoved=0
 
     echo ""
-    echo "Processing generations (oldest first):"
+    echo "Processing generations:"
 
     # Process each system generation
     for generationPath in $(ls -1Adt --time=birth "$PROFILES_PATH"/system-* 2>/dev/null || true); do

@@ -1,5 +1,2 @@
-# Sensitive configuration
-secrets.nix
-
-# Hardware configuration (contains UUIDs)
-hardware-configuration.nix
+# Scratchpad
+scratchpad

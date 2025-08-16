@@ -135,12 +135,6 @@ sudo mkdir -p /mnt/persist/home/$USERNAME
 # Clone directly to the final location
 sudo git clone https://github.com/yourusername/nixosconfig.git /mnt/persist/home/$USERNAME/nixosconfig
 
-# Alternative: Download without git
-# cd /mnt/persist/home/$USERNAME
-# sudo wget https://github.com/yourusername/nixosconfig/archive/main.zip
-# sudo unzip main.zip
-# sudo mv nixosconfig-main nixosconfig
-
 # Set proper ownership
 sudo chown -R 1000:1000 /mnt/persist/home/$USERNAME
 ```

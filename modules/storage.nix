@@ -92,5 +92,8 @@
   services.zfs = {
     autoScrub.enable = true;
     autoScrub.pools = [ "rpool" ];
+    autoScrub.interval = "weekly";
+    trim.enable = true;
+    trim.interval = "weekly";
   };
 }

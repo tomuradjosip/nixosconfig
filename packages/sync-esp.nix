@@ -37,8 +37,8 @@ pkgs.writeShellApplication {
   text = ''
     set -euo pipefail  # Exit on any error, undefined vars, or pipe failures
 
-    PRIMARY_ESP="/dev/disk/by-id/${secrets.diskIds.primary}-part1"
-    SECONDARY_ESP="/dev/disk/by-id/${secrets.diskIds.secondary}-part1"
+    PRIMARY_ESP="/dev/disk/by-id/${secrets.diskIds.osPrimary}-part1"
+    SECONDARY_ESP="/dev/disk/by-id/${secrets.diskIds.osSecondary}-part1"
 
     PRIMARY_MOUNT="/tmp/esp-primary"
     SECONDARY_MOUNT="/tmp/esp-secondary"

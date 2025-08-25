@@ -2,6 +2,12 @@
 
 This guide provides detailed instructions for installing NixOS with ZFS mirror and dual ESP (EFI System Partition) setup.
 
+## 🏗️ **Storage Configuration**
+
+This guide covers the **basic 2-disk setup** (single-tier) for most users.
+
+> **🚀 Advanced Storage**: For multi-tier setups with additional SSD/NVMe/HDD drives, see the **[Advanced Storage Guide](storage.md)** which covers two-tier and three-tier configurations.
+
 ## Step 1: Boot NixOS Installation ISO
 
 1. **Flash the NixOS ISO to a USB drive**
@@ -163,7 +169,9 @@ sudo vi /mnt/persist/etc/secrets/config/secrets.nix
 - Replace `your-hostname` with your chosen hostname
 - Set your timezone (find yours: `timedatectl list-timezones | grep your-region`)
 - Add your SSH public keys (for remote access to this machine)
-- Set your disk IDs (the ones you noted above)
+- Set your disk IDs:
+  - `osPrimary` and `osSecondary`: Your SSD disk IDs (the ones you noted above)
+  - For advanced setups with additional drives, see the [Advanced Storage Guide](storage.md)
 - Set SSH private key filename (generated locally, for access to e.g. github)
 - Generate ZFS host ID: `head -c 8 /etc/machine-id`
 
@@ -223,4 +231,7 @@ sudo umount /mnt/persist
 sudo reboot
 ```
 
-Proceed to [First Boot Setup](first-boot.md)
+## Next Steps
+
+- **[First Boot Setup](first-boot.md)** - Complete post-installation configuration
+- **[Advanced Storage](storage.md)** - Add SSD/NVMe/HDD tiers for enhanced performance and capacity

@@ -4,18 +4,21 @@ A NixOS setup with ZFS mirroring and dual ESP (EFI System Partition) boot partit
 
 ## ✨ Features
 
-- **🔄 ZFS Mirroring** - Automatic data redundancy across two disks
+- **🔄 ZFS Mirroring** - Automatic data redundancy across multiple storage tiers
 - **🚀 Dual ESP Setup** - Boot redundancy with automatic ESP synchronization
 - **🛡️ Impermanent Root** - Fresh system state on every boot for enhanced security
-- **⚙️ Custom Management Tools** - Automated system maintenance and monitoring
-- **📦 Modular Configuration** - Easy to understand and customize
+- **🏗️ Three-Tier Storage** - SSDs (OS) + NVMe (hot data) + HDDs (bulk storage)
+- **📦 MergerFS + SnapRAID** - Flexible bulk storage with parity protection
+- **⚙️ Smart Management Tools** - Automated maintenance across all storage tiers
+- **📈 Scalable Architecture** - Start simple, grow as needed
 
 ## 🚀 Quick Start
 
 ### New Installation
 1. **[📋 Check Prerequisites](docs/installation/prerequisites.md)** - Ensure you have everything needed
-2. **[📖 Follow Installation Guide](docs/installation/step-by-step.md)** - Complete step-by-step process
-3. **[⚡ Complete First Boot Setup](docs/installation/first-boot.md)** - Post-installation configuration
+2. **[📖 Basic Installation](docs/installation/step-by-step.md)** - 2-SSD setup for most users
+3. **[🚀 Advanced Storage](docs/installation/storage.md)** - Multi-tier configurations (optional)
+4. **[⚡ First Boot Setup](docs/installation/first-boot.md)** - Post-installation configuration
 
 ## Daily Usage
 
@@ -26,8 +29,10 @@ rb
 # Test changes safely
 rbt
 
-# Check zfs mirror health
-sudo zpool status rpool
+# Check storage health across all tiers
+bulk-storage status      # Complete overview
+sudo zpool status        # ZFS pools only
+bulk-storage usage       # Detailed usage report
 ```
 
 ## 📚 Documentation

@@ -114,10 +114,10 @@ pkgs.writeShellApplication {
         echo "✅ ESP already mounted"
       else
         # Try primary ESP first
-        if mount -t vfat /dev/disk/by-id/${secrets.diskIds.primary}-part1 /boot 2>/dev/null; then
+        if mount -t vfat /dev/disk/by-id/${secrets.diskIds.osPrimary}-part1 /boot 2>/dev/null; then
           echo "✅ Primary ESP mounted"
         # Fall back to secondary ESP
-        elif mount -t vfat /dev/disk/by-id/${secrets.diskIds.secondary}-part1 /boot 2>/dev/null; then
+        elif mount -t vfat /dev/disk/by-id/${secrets.diskIds.osSecondary}-part1 /boot 2>/dev/null; then
           echo "✅ Secondary ESP mounted (failover)"
         else
           echo "❌ ERROR: Could not mount any ESP"

@@ -7,47 +7,113 @@
 }:
 
 {
-  # Modern EFI bootloader - much simpler than GRUB
+  # Systemd-boot EFI bootloader
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.timeout = 5;
 
-  # ZFS configuration
+  # ZFS support with optional FUSE for mergerfs support
   boot.initrd.availableKernelModules = [ "zfs" ];
   boot.initrd.kernelModules = [ "zfs" ];
-  boot.supportedFilesystems = [ "zfs" ];
-  boot.zfs.devNodes = "/dev";
+  boot.supportedFilesystems = [ "zfs" ] ++ lib.optionals (secrets.diskIds ? bulkData) [ "fuse" ];
+  boot.zfs.devNodes = "/dev"; # TODO check if this is needed
 
   # Impermanence setup with stable device IDs
   boot.initrd.postDeviceCommands = lib.mkAfter ''
-    # Set ZFS mountpoints
+    # Set ZFS mountpoints for OS pool
     zfs set mountpoint=legacy rpool/nix
     zfs set mountpoint=legacy rpool/persist
 
-    # Import and mount ZFS pool (true mirror)
+    # Import and mount OS ZFS pool
     zpool import -f rpool
     mount -t zfs rpool/nix /mnt-root/nix
     mount -t zfs rpool/persist /mnt-root/persist
+
+    # Import data pool if available (optional for users without data drives)
+    if zpool import -f dpool 2>/dev/null; then
+      echo "Data pool (dpool) imported successfully"
+    else
+      echo "Data pool (dpool) not available - skipping"
+    fi
   '';
 
-  # Filesystem configuration
-  fileSystems."/" = {
-    device = "tmpfs";
-    fsType = "tmpfs";
-    options = [ "mode=755" ];
-  };
+  fileSystems = lib.mkMerge [
+    # Base OS filesystems (defined above)
+    {
+      "/" = {
+        device = "tmpfs";
+        fsType = "tmpfs";
+        options = [ "mode=755" ];
+      };
 
-  fileSystems."/nix" = {
-    device = "rpool/nix";
-    fsType = "zfs";
-    neededForBoot = true;
-  };
+      "/nix" = {
+        device = "rpool/nix";
+        fsType = "zfs";
+        neededForBoot = true;
+        options = [ "zfsutil" ];
+      };
 
-  fileSystems."/persist" = {
-    device = "rpool/persist";
-    fsType = "zfs";
-    neededForBoot = true;
-  };
+      "/persist" = {
+        device = "rpool/persist";
+        fsType = "zfs";
+        neededForBoot = true;
+        options = [ "zfsutil" ];
+      };
+    }
+
+    # Conditional data pool filesystems (Tier 2: NVMe)
+    (lib.mkIf (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) {
+      "/data" = {
+        device = "dpool/data";
+        fsType = "zfs";
+        options = [ "zfsutil" ];
+      };
+    })
+
+    # Conditional bulk storage filesystems (Tier 3: HDDs with MergerFS)
+    (lib.mkIf (secrets.diskIds ? bulkData) {
+      "/bulk" = {
+        # Only include data disks (parity disk is separate)
+        device = lib.concatStringsSep ":" (
+          lib.imap (i: diskId: "/mnt/data${toString i}") secrets.diskIds.bulkData
+        );
+        fsType = "fuse.mergerfs";
+        options = [
+          "defaults"
+          "allow_other"
+          "use_ino"
+          "cache.files=partial"
+          "dropcacheonclose=true"
+          "category.create=epmfs" # Existing path, most free space
+        ];
+      };
+    })
+
+    # Individual data disk mount points
+    (lib.mkIf (secrets.diskIds ? bulkData) (
+      lib.listToAttrs (
+        lib.imap (i: diskId: {
+          name = "/mnt/data${toString i}";
+          value = {
+            device = "/dev/disk/by-id/${diskId}";
+            fsType = "ext4";
+            options = [ "defaults" ];
+            noCheck = true;
+          };
+        }) secrets.diskIds.bulkData
+      )
+    ))
+
+    # Parity disk mount point
+    (lib.mkIf (secrets.diskIds ? bulkParity) {
+      "/mnt/parity" = {
+        device = "/dev/disk/by-id/${secrets.diskIds.bulkParity}";
+        fsType = "ext4";
+        options = [ "defaults" ];
+        noCheck = true;
+      };
+    })
+  ];
 
   # Zram swap configuration
   zramSwap = {
@@ -56,42 +122,150 @@
     memoryMax = 2147483648; # 2GB in bytes
   };
 
-  # ESP sync service for redundancy
-  systemd.services.sync-esp = {
-    description = "Sync ESP partitions for redundancy";
-    wantedBy = [ "multi-user.target" ];
-    after = [ "local-fs.target" ];
-    serviceConfig = {
-      Type = "oneshot";
-      # Add capabilities needed for mounting
-      AmbientCapabilities = [ "CAP_SYS_ADMIN" ];
-      CapabilityBoundingSet = [ "CAP_SYS_ADMIN" ];
-      ExecStart = "${pkgs.callPackage ../packages/sync-esp.nix { inherit secrets; }}/bin/sync-esp";
-    };
-  };
-
   # Run ESP sync after system updates
   system.activationScripts.sync-esp = ''
     ${config.systemd.package}/bin/systemctl start sync-esp.service || true
   '';
 
-  # System generation cleanup service - more intelligent than nix-collect-garbage
-  systemd.services.system-profile-cleanup = {
-    description = "Intelligent system profile cleaner";
-    startAt = "daily";
-    serviceConfig = {
-      Type = "oneshot";
-      ExecStart = "${
-        pkgs.callPackage ../packages/system-generation-cleanup.nix { }
-      }/bin/system-generation-cleanup";
-    };
-  };
-  systemd.timers.system-profile-cleanup.timerConfig.Persistent = true;
+  # System services (ESP sync, cleanup, and bulk storage)
+  systemd.services = lib.mkMerge [
+    # Base services (always present)
+    {
+      # ESP sync service for redundancy
+      sync-esp = {
+        description = "Sync ESP partitions for redundancy";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "local-fs.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          # Add capabilities needed for mounting
+          AmbientCapabilities = [ "CAP_SYS_ADMIN" ];
+          CapabilityBoundingSet = [ "CAP_SYS_ADMIN" ];
+          ExecStart = "${pkgs.callPackage ../packages/sync-esp.nix { inherit secrets; }}/bin/sync-esp";
+        };
+      };
 
-  # ZFS services
+      # System generation cleanup service - more intelligent than nix-collect-garbage
+      system-profile-cleanup = {
+        description = "Intelligent system profile cleaner";
+        startAt = "daily";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${
+            pkgs.callPackage ../packages/system-generation-cleanup.nix { }
+          }/bin/system-generation-cleanup";
+        };
+      };
+    }
+
+    # Bulk storage services (conditional)
+    (lib.mkIf (secrets.diskIds ? bulkData) {
+      # Format and mount individual HDDs
+      "setup-bulk-disks" = {
+        description = "Setup individual bulk storage disks";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "local-fs.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${
+            pkgs.callPackage ../packages/setup-bulk-disks.nix { inherit secrets; }
+          }/bin/setup-bulk-disks";
+        };
+      };
+
+      # SnapRAID sync service
+      "snapraid-sync" = {
+        description = "SnapRAID sync operation";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.snapraid}/bin/snapraid sync";
+        };
+      };
+
+      # SnapRAID scrub service
+      "snapraid-scrub" = {
+        description = "SnapRAID scrub operation";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.snapraid}/bin/snapraid scrub -p 10";
+        };
+      };
+    })
+  ];
+
+  # SnapRAID configuration (conditional)
+  environment.etc = lib.mkIf (secrets.diskIds ? bulkData && secrets.diskIds ? bulkParity) {
+    "snapraid.conf".text = ''
+      # SnapRAID configuration for ${toString (builtins.length secrets.diskIds.bulkData)} data disks + 1 parity disk
+
+      # Parity file
+      parity /mnt/parity/snapraid.parity
+
+      # Data disks
+      ${lib.concatImapStrings (
+        i: diskId: "data d${toString i} /mnt/data${toString i}/\n"
+      ) secrets.diskIds.bulkData}
+
+      # Content files (metadata stored on each disk)
+      ${lib.concatImapStrings (
+        i: diskId: "content /mnt/data${toString i}/snapraid.content\n"
+      ) secrets.diskIds.bulkData}
+      content /mnt/parity/snapraid.content
+
+      # Exclude patterns
+      exclude *.tmp
+      exclude *.temp
+      exclude Thumbs.db
+      exclude .DS_Store
+      exclude *.!sync
+
+      # Block size (larger blocks for better performance with large files)
+      block_size 256
+
+      # Auto-save content file
+      autosave 500
+    '';
+  };
+
+  # Systemd timers (cleanup and SnapRAID maintenance)
+  systemd.timers = lib.mkMerge [
+    # Base timers (always present)
+    {
+      system-profile-cleanup.timerConfig.Persistent = true;
+    }
+
+    # Bulk storage timers (conditional)
+    (lib.mkIf (secrets.diskIds ? bulkData) {
+      "snapraid-sync" = {
+        description = "Run SnapRAID sync daily";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnCalendar = "daily";
+          Persistent = true;
+          RandomizedDelaySec = "30m";
+        };
+      };
+
+      "snapraid-scrub" = {
+        description = "Run SnapRAID scrub weekly";
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnCalendar = "weekly";
+          Persistent = true;
+          RandomizedDelaySec = "2h";
+        };
+      };
+    })
+  ];
+
+  # ZFS services - include data pool if available
   services.zfs = {
     autoScrub.enable = true;
-    autoScrub.pools = [ "rpool" ];
+    autoScrub.pools = [
+      "rpool"
+    ]
+    ++ lib.optionals (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) [ "dpool" ];
     autoScrub.interval = "weekly";
     trim.enable = true;
     trim.interval = "weekly";

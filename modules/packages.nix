@@ -26,6 +26,14 @@
       (pkgs.callPackage ../packages/sync-esp.nix { inherit secrets; })
       (pkgs.callPackage ../packages/nixos-rebuild-with-esp.nix { inherit secrets; })
       (pkgs.callPackage ../packages/system-generation-cleanup.nix { })
+    ]
+    ++ lib.optionals (secrets.diskIds ? bulkData) [
+      # Bulk storage tier packages
+      mergerfs # Union filesystem for HDDs
+      snapraid # Parity protection for bulk storage
+      # Bulk storage management
+      (pkgs.callPackage ../packages/setup-bulk-disks.nix { inherit secrets; })
+      (pkgs.callPackage ../packages/bulk-storage-manager.nix { inherit secrets; })
     ];
 
   # Need this for vscode-server

@@ -20,6 +20,7 @@
       htop
       pre-commit
       oh-my-posh
+      parted
     ]
     ++ [
       # Custom packages

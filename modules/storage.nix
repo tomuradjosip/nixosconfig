@@ -37,6 +37,24 @@
     fi
   '';
 
+  # # Filesystem configuration
+  # fileSystems."/" = {
+  #   device = "tmpfs";
+  #   fsType = "tmpfs";
+  #   options = [ "mode=755" ];
+  # };
+
+  # fileSystems."/nix" = {
+  #   device = "rpool/nix";
+  #   fsType = "zfs";
+  #   neededForBoot = true;
+  # };
+
+  # fileSystems."/persist" = {
+  #   device = "rpool/persist";
+  #   fsType = "zfs";
+  #   neededForBoot = true;
+  # };
   fileSystems = lib.mkMerge [
     # Base OS filesystems (defined above)
     {
@@ -50,14 +68,12 @@
         device = "rpool/nix";
         fsType = "zfs";
         neededForBoot = true;
-        options = [ "zfsutil" ];
       };
 
       "/persist" = {
         device = "rpool/persist";
         fsType = "zfs";
         neededForBoot = true;
-        options = [ "zfsutil" ];
       };
     }
 
@@ -66,54 +82,54 @@
       "/data" = {
         device = "dpool/data";
         fsType = "zfs";
-        options = [ "zfsutil" ];
-      };
-    })
-
-    # Conditional bulk storage filesystems (Tier 3: HDDs with MergerFS)
-    (lib.mkIf (secrets.diskIds ? bulkData) {
-      "/bulk" = {
-        # Only include data disks (parity disk is separate)
-        device = lib.concatStringsSep ":" (
-          lib.imap (i: diskId: "/mnt/data${toString i}") secrets.diskIds.bulkData
-        );
-        fsType = "fuse.mergerfs";
-        options = [
-          "defaults"
-          "allow_other"
-          "use_ino"
-          "cache.files=partial"
-          "dropcacheonclose=true"
-          "category.create=epmfs" # Existing path, most free space
-        ];
-      };
-    })
-
-    # Individual data disk mount points
-    (lib.mkIf (secrets.diskIds ? bulkData) (
-      lib.listToAttrs (
-        lib.imap (i: diskId: {
-          name = "/mnt/data${toString i}";
-          value = {
-            device = "/dev/disk/by-id/${diskId}";
-            fsType = "ext4";
-            options = [ "defaults" ];
-            noCheck = true;
-          };
-        }) secrets.diskIds.bulkData
-      )
-    ))
-
-    # Parity disk mount point
-    (lib.mkIf (secrets.diskIds ? bulkParity) {
-      "/mnt/parity" = {
-        device = "/dev/disk/by-id/${secrets.diskIds.bulkParity}";
-        fsType = "ext4";
-        options = [ "defaults" ];
-        noCheck = true;
       };
     })
   ];
+
+  #   # Conditional bulk storage filesystems (Tier 3: HDDs with MergerFS)
+  #   (lib.mkIf (secrets.diskIds ? bulkData) {
+  #     "/bulk" = {
+  #       # Only include data disks (parity disk is separate)
+  #       device = lib.concatStringsSep ":" (
+  #         lib.imap (i: diskId: "/mnt/data${toString i}") secrets.diskIds.bulkData
+  #       );
+  #       fsType = "fuse.mergerfs";
+  #       options = [
+  #         "defaults"
+  #         "allow_other"
+  #         "use_ino"
+  #         "cache.files=partial"
+  #         "dropcacheonclose=true"
+  #         "category.create=epmfs" # Existing path, most free space
+  #       ];
+  #     };
+  #   })
+
+  #   # Individual data disk mount points
+  #   (lib.mkIf (secrets.diskIds ? bulkData) (
+  #     lib.listToAttrs (
+  #       lib.imap (i: diskId: {
+  #         name = "/mnt/data${toString i}";
+  #         value = {
+  #           device = "/dev/disk/by-id/${diskId}";
+  #           fsType = "ext4";
+  #           options = [ "defaults" ];
+  #           noCheck = true;
+  #         };
+  #       }) secrets.diskIds.bulkData
+  #     )
+  #   ))
+
+  #   # Parity disk mount point
+  #   (lib.mkIf (secrets.diskIds ? bulkParity) {
+  #     "/mnt/parity" = {
+  #       device = "/dev/disk/by-id/${secrets.diskIds.bulkParity}";
+  #       fsType = "ext4";
+  #       options = [ "defaults" ];
+  #       noCheck = true;
+  #     };
+  #   })
+  # ];
 
   # Zram swap configuration
   zramSwap = {

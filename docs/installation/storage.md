@@ -33,6 +33,11 @@ Your system's storage is managed by `modules/storage.nix`, which automatically:
 
 ## 🔧 Adding Storage Tiers
 
+> **📋 Critical Workflow**: Follow these steps **in order**:
+> 1. **Identify** drives → 2. **Partition** drives → 3. **Format** drives → 4. **Update** secrets.nix → 5. **Rebuild** system
+>
+> **⚠️ Do NOT add disk IDs to `secrets.nix` until after formatting!** The system will fail to boot if it tries to mount unformatted disks.
+
 ### Step 1: Identify Additional Drives
 
 ```bash
@@ -67,17 +72,24 @@ sudo parted $DATA_DISK2 -- mkpart primary 1MiB 100%
 
 #### For HDDs (Tier 3)
 ```bash
-# Set variables
+# Set variables (replace with your actual disk IDs from Step 1)
 BULK_DISK1="/dev/disk/by-id/your-first-hdd-id"
 BULK_DISK2="/dev/disk/by-id/your-second-hdd-id"
 BULK_DISK3="/dev/disk/by-id/your-third-hdd-id"
 BULK_DISK4="/dev/disk/by-id/your-fourth-hdd-id"
 
-# Partition HDDs
-for disk in "$BULK_DISK1" "$BULK_DISK2" "$BULK_DISK3" "$BULK_DISK4"; do
-  sudo parted "$disk" -- mklabel gpt
-  sudo parted "$disk" -- mkpart primary 1MiB 100%
-done
+# Partition each HDD individually
+sudo parted $BULK_DISK1 -- mklabel gpt
+sudo parted $BULK_DISK1 -- mkpart primary 1MiB 100%
+
+sudo parted $BULK_DISK2 -- mklabel gpt
+sudo parted $BULK_DISK2 -- mkpart primary 1MiB 100%
+
+sudo parted $BULK_DISK3 -- mklabel gpt
+sudo parted $BULK_DISK3 -- mkpart primary 1MiB 100%
+
+sudo parted $BULK_DISK4 -- mklabel gpt
+sudo parted $BULK_DISK4 -- mkpart primary 1MiB 100%
 ```
 
 ### Step 3: Create Filesystems
@@ -93,15 +105,19 @@ sudo zfs create -o mountpoint=legacy dpool/data
 ```
 
 #### Tier 3: Bulk Storage (Optional)
+
 ```bash
-# Format and mount HDDs
-for i in {1..4}; do
-  disk_var="BULK_DISK$i"
-  disk_path="${!disk_var}-part1"
-  sudo mkfs.ext4 -F "$disk_path"
-  sudo mkdir -p "/mnt/disk$i"
-  sudo mount "$disk_path" "/mnt/disk$i"
-done
+# Format each HDD with ext4 filesystem
+sudo mkfs.ext4 ${BULK_DISK1}-part1
+sudo mkfs.ext4 ${BULK_DISK2}-part1
+sudo mkfs.ext4 ${BULK_DISK3}-part1
+sudo mkfs.ext4 ${BULK_DISK4}-part1
+
+# Verify filesystems were created successfully
+sudo blkid ${BULK_DISK1}-part1
+sudo blkid ${BULK_DISK2}-part1
+sudo blkid ${BULK_DISK3}-part1
+sudo blkid ${BULK_DISK4}-part1
 ```
 
 ### Step 4: Update Secrets Configuration
@@ -114,7 +130,7 @@ sudo vi /etc/secrets/config/secrets.nix
 
 **Add your additional disk IDs:**
 - **For Tier 2 (NVMe)**: Add `dataPrimary` and `dataSecondary` with your NVMe disk IDs
-- **For Tier 3 (HDDs)**: Add `bulk = [...]` with your HDD disk IDs (use the exact IDs from Step 1)
+- **For Tier 3 (HDDs)**: Add the first 3 disks to `bulkData = [...]` and the 4th disk as `bulkParity` (use the exact IDs from Step 1, without `-part1` suffix)
 - **For bulk directories**: Add `bulkStorageDirectories = [...]` with your preferred directory names (optional)
 
 ### Step 5: Apply Configuration

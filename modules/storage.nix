@@ -84,52 +84,51 @@
         fsType = "zfs";
       };
     })
+
+    # Conditional bulk storage filesystems (Tier 3: HDDs with MergerFS)
+    (lib.mkIf (secrets.diskIds ? bulkData) {
+      "/bulk" = {
+        # Only include data disks (parity disk is separate)
+        device = lib.concatStringsSep ":" (
+          lib.imap (i: diskId: "/mnt/data${toString i}") secrets.diskIds.bulkData
+        );
+        fsType = "fuse.mergerfs";
+        options = [
+          "defaults"
+          "allow_other"
+          "use_ino"
+          "cache.files=partial"
+          "dropcacheonclose=true"
+          "category.create=epmfs" # Existing path, most free space
+        ];
+      };
+    })
+
+    # Individual data disk mount points
+    (lib.mkIf (secrets.diskIds ? bulkData) (
+      lib.listToAttrs (
+        lib.imap (i: diskId: {
+          name = "/mnt/data${toString i}";
+          value = {
+            device = "/dev/disk/by-id/${diskId}-part1";
+            fsType = "ext4";
+            options = [ "defaults" ];
+            noCheck = true;
+          };
+        }) secrets.diskIds.bulkData
+      )
+    ))
+
+    # Parity disk mount point
+    (lib.mkIf (secrets.diskIds ? bulkParity) {
+      "/mnt/parity" = {
+        device = "/dev/disk/by-id/${secrets.diskIds.bulkParity}-part1";
+        fsType = "ext4";
+        options = [ "defaults" ];
+        noCheck = true;
+      };
+    })
   ];
-
-  #   # Conditional bulk storage filesystems (Tier 3: HDDs with MergerFS)
-  #   (lib.mkIf (secrets.diskIds ? bulkData) {
-  #     "/bulk" = {
-  #       # Only include data disks (parity disk is separate)
-  #       device = lib.concatStringsSep ":" (
-  #         lib.imap (i: diskId: "/mnt/data${toString i}") secrets.diskIds.bulkData
-  #       );
-  #       fsType = "fuse.mergerfs";
-  #       options = [
-  #         "defaults"
-  #         "allow_other"
-  #         "use_ino"
-  #         "cache.files=partial"
-  #         "dropcacheonclose=true"
-  #         "category.create=epmfs" # Existing path, most free space
-  #       ];
-  #     };
-  #   })
-
-  #   # Individual data disk mount points
-  #   (lib.mkIf (secrets.diskIds ? bulkData) (
-  #     lib.listToAttrs (
-  #       lib.imap (i: diskId: {
-  #         name = "/mnt/data${toString i}";
-  #         value = {
-  #           device = "/dev/disk/by-id/${diskId}";
-  #           fsType = "ext4";
-  #           options = [ "defaults" ];
-  #           noCheck = true;
-  #         };
-  #       }) secrets.diskIds.bulkData
-  #     )
-  #   ))
-
-  #   # Parity disk mount point
-  #   (lib.mkIf (secrets.diskIds ? bulkParity) {
-  #     "/mnt/parity" = {
-  #       device = "/dev/disk/by-id/${secrets.diskIds.bulkParity}";
-  #       fsType = "ext4";
-  #       options = [ "defaults" ];
-  #       noCheck = true;
-  #     };
-  #   })
-  # ];
 
   # Zram swap configuration
   zramSwap = {
@@ -176,20 +175,6 @@
 
     # Bulk storage services (conditional)
     (lib.mkIf (secrets.diskIds ? bulkData) {
-      # Format and mount individual HDDs
-      "setup-bulk-disks" = {
-        description = "Setup individual bulk storage disks";
-        wantedBy = [ "multi-user.target" ];
-        after = [ "local-fs.target" ];
-        serviceConfig = {
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = "${
-            pkgs.callPackage ../packages/setup-bulk-disks.nix { inherit secrets; }
-          }/bin/setup-bulk-disks";
-        };
-      };
-
       # SnapRAID sync service
       "snapraid-sync" = {
         description = "SnapRAID sync operation";

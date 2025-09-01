@@ -21,6 +21,7 @@
       pre-commit
       oh-my-posh
       parted
+      smartmontools
     ]
     ++ [
       # Custom packages
@@ -32,8 +33,8 @@
       # Bulk storage tier packages
       mergerfs # Union filesystem for HDDs
       snapraid # Parity protection for bulk storage
-      # Bulk storage management
-      (pkgs.callPackage ../packages/bulk-storage-manager.nix { inherit secrets; })
+      # Storage management
+      (pkgs.callPackage ../packages/storage-manager.nix { inherit secrets; })
     ];
 
   # Need this for vscode-server

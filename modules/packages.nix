@@ -22,6 +22,7 @@
       oh-my-posh
       parted
       smartmontools
+      hdparm
     ]
     ++ [
       # Custom packages

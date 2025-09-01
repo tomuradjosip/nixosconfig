@@ -142,6 +142,13 @@
     ${config.systemd.package}/bin/systemctl start sync-esp.service || true
   '';
 
+  # Disk power management via udev rules
+  services.udev.extraRules = ''
+    # Set power management for HDDs (rotational drives) on device add
+    SUBSYSTEM=="block", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="1", \
+      RUN+="${pkgs.hdparm}/bin/hdparm -S 240 -B 127 /dev/%k"
+  '';
+
   # System services (ESP sync, cleanup, and bulk storage)
   systemd.services = lib.mkMerge [
     # Base services (always present)

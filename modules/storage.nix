@@ -208,10 +208,8 @@
         i: diskId: "data d${toString i} /mnt/data${toString i}/\n"
       ) secrets.diskIds.bulkData}
 
-      # Content files (metadata stored on each disk)
-      ${lib.concatImapStrings (
-        i: diskId: "content /mnt/data${toString i}/snapraid.content\n"
-      ) secrets.diskIds.bulkData}
+      # Content files (system storage + parity disk)
+      content /persist/snapraid.content
       content /mnt/parity/snapraid.content
 
       # Exclude patterns
@@ -220,9 +218,6 @@
       exclude Thumbs.db
       exclude .DS_Store
       exclude *.!sync
-
-      # Block size (larger blocks for better performance with large files)
-      block_size 256
 
       # Auto-save content file
       autosave 500

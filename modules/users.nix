@@ -22,6 +22,7 @@
     extraGroups = [
       "wheel"
       "networkmanager"
+      "docker"
     ];
     hashedPasswordFile = "/persist/etc/secrets/passwords/${secrets.username}";
     openssh.authorizedKeys.keys = secrets.sshKeys;

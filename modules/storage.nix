@@ -23,6 +23,7 @@
     # Set ZFS mountpoints for OS pool
     zfs set mountpoint=legacy rpool/nix
     zfs set mountpoint=legacy rpool/persist
+    zfs set mountpoint=legacy rpool/containers
 
     # Import and mount OS ZFS pool
     zpool import -f rpool
@@ -37,24 +38,6 @@
     fi
   '';
 
-  # # Filesystem configuration
-  # fileSystems."/" = {
-  #   device = "tmpfs";
-  #   fsType = "tmpfs";
-  #   options = [ "mode=755" ];
-  # };
-
-  # fileSystems."/nix" = {
-  #   device = "rpool/nix";
-  #   fsType = "zfs";
-  #   neededForBoot = true;
-  # };
-
-  # fileSystems."/persist" = {
-  #   device = "rpool/persist";
-  #   fsType = "zfs";
-  #   neededForBoot = true;
-  # };
   fileSystems = lib.mkMerge [
     # Base OS filesystems (defined above)
     {
@@ -74,6 +57,12 @@
         device = "rpool/persist";
         fsType = "zfs";
         neededForBoot = true;
+      };
+
+      "/containers" = {
+        device = "rpool/containers";
+        fsType = "zfs";
+        neededForBoot = false;
       };
     }
 

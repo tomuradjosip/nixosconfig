@@ -116,7 +116,13 @@ sudo zpool create -f -o ashift=12 -O mountpoint=none -O atime=off -O compression
 ```bash
 sudo zfs create -o mountpoint=legacy rpool/nix
 sudo zfs create -o mountpoint=legacy rpool/persist
+sudo zfs create -o mountpoint=legacy rpool/containers
 ```
+
+**Dataset purposes**:
+- `rpool/nix`: Nix store (packages and system files)
+- `rpool/persist`: System configuration and user data
+- `rpool/containers`: Container configurations and data
 
 ## Step 7: Mount Filesystems
 
@@ -124,7 +130,7 @@ sudo zfs create -o mountpoint=legacy rpool/persist
 # Create mount points
 sudo mkdir -p /mnt/{nix,persist,boot}
 
-# Mount ZFS datasets
+# Mount ZFS datasets (only those needed for installation)
 sudo mount -t zfs rpool/nix /mnt/nix
 sudo mount -t zfs rpool/persist /mnt/persist
 

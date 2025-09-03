@@ -23,6 +23,8 @@
       parted
       smartmontools
       hdparm
+      restic
+      backrest
     ]
     ++ [
       # Custom packages

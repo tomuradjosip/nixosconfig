@@ -18,6 +18,7 @@ in
     ./modules/shell.nix
     ./modules/persistence.nix
     ./modules/localization.nix
+    ./modules/backup.nix
   ];
 
   # Enable flakes

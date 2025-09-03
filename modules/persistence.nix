@@ -16,6 +16,7 @@
       "/var/log" # System logs for debugging and troubleshooting
       "/var/lib/systemd" # Systemd state and journal data
       "/var/lib/NetworkManager" # NetworkManager state and interface info
+      "/var/lib/restic" # Restic cache
       "/etc/NetworkManager/system-connections" # Saved WiFi passwords and network configs
       "/home" # All user data and application settings
     ];

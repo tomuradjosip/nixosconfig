@@ -23,6 +23,7 @@
       "wheel"
       "networkmanager"
       "docker"
+      "podman"
     ];
     hashedPasswordFile = "/persist/etc/secrets/passwords/${secrets.username}";
     openssh.authorizedKeys.keys = secrets.sshKeys;

@@ -25,6 +25,7 @@ let
     backupPaths = [
       "/home/${secrets.username}/.ssh"
       "/etc/secrets"
+      "/containers/homelab"
     ];
 
     # What to exclude from backups

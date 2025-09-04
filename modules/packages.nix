@@ -51,6 +51,13 @@
 
   # Podman configuration
   virtualisation.containers.enable = true;
+  virtualisation.containers.storage.settings = {
+    storage = {
+      driver = "zfs";
+      runroot = "/containers/run/containers/storage";
+      graphroot = "/containers/var/lib/containers/storage";
+    };
+  };
   virtualisation = {
     podman = {
       enable = true;

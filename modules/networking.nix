@@ -18,6 +18,11 @@
     };
   };
 
+  # Kernel parameters for rootless podman
+  boot.kernel.sysctl = {
+    "net.ipv4.ip_unprivileged_port_start" = 80;
+  };
+
   # Enable SSH server with secure settings
   services.openssh = {
     enable = true;

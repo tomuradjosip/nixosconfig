@@ -24,6 +24,7 @@
       smartmontools
       hdparm
       restic
+      podman-compose
     ]
     ++ [
       # Custom packages

@@ -31,6 +31,9 @@
     };
 
     shellInit = ''
+      # Environment variables
+      export PODMAN_COMPOSE_WARNING_LOGS=false
+
       # Example how to include optional pre-commit call
       # ac() { if [ -f .pre-commit-config.yaml ]; then pre-commit run -a; fi; git add .; git commit -m "$1"; }
 

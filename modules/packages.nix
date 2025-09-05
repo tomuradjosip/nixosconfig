@@ -59,6 +59,13 @@
       graphroot = "/containers/var/lib/containers/storage";
     };
   };
+  virtualisation.containers.containersConf.settings = {
+    containers = {
+      log_driver = "k8s-file";
+      log_size_max = 10485760; # 10MB in bytes
+      log_rotate_max = 3; # Keep 3 log files
+    };
+  };
   virtualisation = {
     podman = {
       enable = true;

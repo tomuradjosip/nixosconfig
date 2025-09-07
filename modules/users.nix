@@ -24,6 +24,7 @@
       "networkmanager"
       "docker"
       "podman"
+      "systemd-journal"
     ];
     hashedPasswordFile = "/persist/etc/secrets/passwords/${secrets.username}";
     openssh.authorizedKeys.keys = secrets.sshKeys;

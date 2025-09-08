@@ -58,4 +58,9 @@
 
   # Allow users in wheel group to use sudo without password
   security.sudo.wheelNeedsPassword = false;
+
+  # Enable lingering for rootless podman
+  systemd.tmpfiles.rules = [
+    "f /var/lib/systemd/linger/${secrets.username} 0644 root root - -"
+  ];
 }

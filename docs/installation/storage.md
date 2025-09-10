@@ -102,6 +102,7 @@ sudo zpool create -f -o ashift=12 -O mountpoint=none -O atime=off -O compression
 
 # Create datasets
 sudo zfs create -o mountpoint=legacy dpool/data
+sudo zfs create -o mountpoint=legacy dpool/containers
 ```
 
 #### Tier 3: Bulk Storage (Optional)

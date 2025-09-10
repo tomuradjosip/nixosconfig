@@ -23,7 +23,6 @@
     # Set ZFS mountpoints for OS pool
     zfs set mountpoint=legacy rpool/nix
     zfs set mountpoint=legacy rpool/persist
-    zfs set mountpoint=legacy rpool/containers
 
     # Import and mount OS ZFS pool
     zpool import -f rpool
@@ -58,16 +57,15 @@
         fsType = "zfs";
         neededForBoot = true;
       };
-
-      "/containers" = {
-        device = "rpool/containers";
-        fsType = "zfs";
-        neededForBoot = false;
-      };
     }
 
     # Conditional data pool filesystems (Tier 2: NVMe)
     (lib.mkIf (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) {
+      "/containers" = {
+        device = "dpool/containers";
+        fsType = "zfs";
+      };
+
       "/data" = {
         device = "dpool/data";
         fsType = "zfs";

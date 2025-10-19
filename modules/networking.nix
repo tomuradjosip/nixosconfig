@@ -15,16 +15,19 @@
       enable = true;
       allowedTCPPorts = [
         22
+        53
         80
         443
       ];
-      allowedUDPPorts = [ ];
+      allowedUDPPorts = [
+        53
+      ];
     };
   };
 
   # Kernel parameters for rootless podman
   boot.kernel.sysctl = {
-    "net.ipv4.ip_unprivileged_port_start" = 80;
+    "net.ipv4.ip_unprivileged_port_start" = 53;
   };
 
   # Enable SSH server with secure settings

@@ -25,6 +25,11 @@
       hdparm
       restic
       podman-compose
+      (python3.withPackages (
+        ps: with ps; [
+          pyyaml
+        ]
+      ))
     ]
     ++ [
       # Custom packages

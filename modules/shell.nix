@@ -28,19 +28,28 @@
       # Better ls
       ll = "ls -lah";
       la = "ls -lah";
+
+      # Pre-commit
+      pre = "pre-commit run -a";
+
+      # homelab sync homelab
+      hsh = "/containers/homelab/scripts/sync-homelab.sh";
+      # homelab status
+      hst = "/containers/homelab/scripts/status-homelab.sh";
+      # homelab sync pihole
+      hsp = "/containers/homelab/scripts/sync-pihole-dns.py";
+      # homelab restart
+      hr = "systemctl --user restart homelab.target";
     };
 
     shellInit = ''
       # Environment variables
       export PODMAN_COMPOSE_WARNING_LOGS=false
 
-      # Example how to include optional pre-commit call
-      # ac() { if [ -f .pre-commit-config.yaml ]; then pre-commit run -a; fi; git add .; git commit -m "$1"; }
-
       # Git functions
-      ac() { git add .; git commit -m "$1"; }
-      acp() { git add .; git commit -m "$1" && git push; }
-      acpf() { git add .; git commit -m "$1" && git push --force-with-lease --force-if-includes; }
+      ac() { if [ -f .pre-commit-config.yaml ]; then git add .; pre-commit run -a; fi; git add .; git commit -m "$1"; }
+      acp() { if [ -f .pre-commit-config.yaml ]; then git add .; pre-commit run -a; fi; git add .; git commit -m "$1" && git push; }
+      acpf() { if [ -f .pre-commit-config.yaml ]; then git add .; pre-commit run -a; fi; git add .; git commit -m "$1" && git push --force-with-lease --force-if-includes; }
 
       # Initialize oh-my-posh with custom theme
       eval "$(oh-my-posh init zsh --config /home/${secrets.username}/nixosconfig/themes/terminal_theme.json)"

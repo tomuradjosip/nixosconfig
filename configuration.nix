@@ -19,6 +19,7 @@ in
     ./modules/persistence.nix
     ./modules/localization.nix
     ./modules/backup.nix
+    ./modules/samba.nix
   ];
 
   # Enable flakes

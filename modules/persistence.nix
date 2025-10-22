@@ -25,6 +25,9 @@
       "/home/${secrets.username}/.cursor" # Cursor IDE cache and settings
       "/home/${secrets.username}/.cursor-server" # Cursor server files
       "/home/${secrets.username}/nixosconfig" # NixOS configuration
+    ]
+    ++ lib.optionals (secrets.diskIds ? bulkData) [
+      "/var/lib/samba" # Samba password database
     ];
     files = [
       "/etc/machine-id" # Unique system identifier used by many services

@@ -26,6 +26,7 @@ let
       "/home/${secrets.username}/.ssh"
       "/etc/secrets"
       "/containers/homelab"
+      "/bulk/mikrotik"
     ];
 
     # What to exclude from backups

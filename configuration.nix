@@ -20,6 +20,7 @@ in
     ./modules/localization.nix
     ./modules/backup.nix
     ./modules/samba.nix
+    ./modules/mikrotik-backup.nix
   ];
 
   # Enable flakes

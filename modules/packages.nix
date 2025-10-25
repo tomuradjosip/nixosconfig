@@ -13,6 +13,7 @@
       # System packages
       rsync
       zfs
+      fzf
       vim
       wget
       git

@@ -59,8 +59,19 @@
   # Allow users in wheel group to use sudo without password
   security.sudo.wheelNeedsPassword = false;
 
-  # Enable lingering for rootless podman
+  # Enable lingering for rootless podman and create user container directories
   systemd.tmpfiles.rules = [
     "f /var/lib/systemd/linger/${secrets.username} 0644 root root - -"
+    # Create user container directories on ZFS
+    "d /containers/users 0755 ${secrets.username} users - -"
+    "d /containers/users/${secrets.username} 0755 ${secrets.username} users - -"
+    "d /containers/users/${secrets.username}/storage 0755 ${secrets.username} users - -"
+    "d /containers/users/${secrets.username}/run 0755 ${secrets.username} users - -"
+    # Create config directory
+    "d /home/${secrets.username}/.config/containers 0755 ${secrets.username} users - -"
+    # Copy storage config from /etc to user home
+    "C /home/${secrets.username}/.config/containers/storage.conf 0644 ${secrets.username} users - /etc/containers-user-storage-${secrets.username}.conf"
+    # Symlink from home to ZFS storage
+    "L+ /home/${secrets.username}/.local/share/containers - - - - /containers/users/${secrets.username}/storage"
   ];
 }

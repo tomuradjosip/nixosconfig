@@ -25,6 +25,7 @@
       hdparm
       restic
       podman-compose
+      fuse-overlayfs # Required for rootless containers
       (python3.withPackages (
         ps: with ps; [
           pyyaml
@@ -83,4 +84,15 @@
     enable = true;
     wantedBy = [ "sockets.target" ];
   };
+
+  # User-level container storage configuration
+  environment.etc."containers-user-storage-${secrets.username}.conf".text = ''
+    [storage]
+      driver = "overlay"
+      runroot = "/containers/users/${secrets.username}/run"
+      graphroot = "/containers/users/${secrets.username}/storage"
+
+    [storage.options]
+      mount_program = "${pkgs.fuse-overlayfs}/bin/fuse-overlayfs"
+  '';
 }

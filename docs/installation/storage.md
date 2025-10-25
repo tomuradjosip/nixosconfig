@@ -152,15 +152,25 @@ Your system will have:
 
 ```
 /                    # Temporary root (tmpfs)
-├── nix/             # Nix store (Tier 1: SSD)
-├── persist/         # Persistent data (Tier 1: SSD)
-├── data/            # Hot data (Tier 2: NVMe) - if configured
+├── nix/             # Nix store (Tier 1: SSD - rpool)
+├── persist/         # Persistent data (Tier 1: SSD - rpool)
+├── containers/      # Container storage (location depends on your setup - see below)
+├── data/            # Hot data (Tier 2: NVMe - dpool) - if configured
 ├── bulk/            # Bulk storage (Tier 3: HDDs) - if configured
 │   ├── Media/       # Example configurable directories
 │   ├── Archive/
 │   └── Downloads/
 │   └── Backup/
 ```
+
+**Container Storage Location:**
+
+| Your Setup | Container Storage | Performance |
+|------------|------------------|-------------|
+| Single-tier (no NVMe) | `rpool/containers` (SSD) | Good |
+| Multi-tier (with NVMe) | `dpool/containers` (NVMe) | Excellent |
+
+The system automatically uses the correct location based on which datasets you created during installation.
 
 ### Management Commands
 

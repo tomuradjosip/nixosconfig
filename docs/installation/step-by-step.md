@@ -113,14 +113,28 @@ sudo zpool create -f -o ashift=12 -O mountpoint=none -O atime=off -O compression
 ```
 
 ### Create ZFS Datasets
+
+**Base datasets (always required):**
 ```bash
 sudo zfs create -o mountpoint=legacy rpool/nix
 sudo zfs create -o mountpoint=legacy rpool/persist
 ```
 
+**Container storage dataset (conditional):**
+
+If you **will NOT add NVMe drives** to this system (single-tier setup):
+```bash
+sudo zfs create -o mountpoint=legacy rpool/containers
+```
+
+If you **plan to add NVMe drives** later (multi-tier setup):
+- Skip creating `rpool/containers` now
+- You'll create `dpool/containers` when you add NVMe drives (see [Advanced Storage Guide](storage.md))
+
 **Dataset purposes**:
 - `rpool/nix`: Nix store (packages and system files)
 - `rpool/persist`: System configuration and user data
+- `rpool/containers`: Container storage (only if NOT using NVMe drives)
 
 ## Step 7: Mount Filesystems
 

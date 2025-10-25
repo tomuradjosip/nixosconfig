@@ -32,8 +32,16 @@
     # Import data pool if available (optional for users without data drives)
     if zpool import -f dpool 2>/dev/null; then
       echo "Data pool (dpool) imported successfully"
+      # Set mountpoint for dpool containers dataset if it exists
+      if zfs list dpool/containers >/dev/null 2>&1; then
+        zfs set mountpoint=legacy dpool/containers
+      fi
     else
-      echo "Data pool (dpool) not available - skipping"
+      echo "Data pool (dpool) not available - using rpool for containers"
+      # Set mountpoint for rpool containers dataset if it exists
+      if zfs list rpool/containers >/dev/null 2>&1; then
+        zfs set mountpoint=legacy rpool/containers
+      fi
     fi
   '';
 
@@ -59,13 +67,20 @@
       };
     }
 
-    # Conditional data pool filesystems (Tier 2: NVMe)
-    (lib.mkIf (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) {
+    # Containers storage (essential) - fallback to rpool if dpool unavailable
+    {
       "/containers" = {
-        device = "dpool/containers";
+        device =
+          if (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) then
+            "dpool/containers"
+          else
+            "rpool/containers";
         fsType = "zfs";
       };
+    }
 
+    # Conditional data pool filesystems (Tier 2: NVMe)
+    (lib.mkIf (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) {
       "/data" = {
         device = "dpool/data";
         fsType = "zfs";

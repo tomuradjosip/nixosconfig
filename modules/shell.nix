@@ -32,6 +32,9 @@
       # Pre-commit
       pre = "pre-commit run -a";
 
+      # cd to media directory
+      mcd = "cd /bulk/media";
+
       # homelab sync homelab
       hsh = "/containers/homelab/scripts/sync-homelab.sh";
       # homelab status

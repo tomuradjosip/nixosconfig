@@ -42,7 +42,9 @@
       # homelab sync pihole
       hsp = "/containers/homelab/scripts/sync-pihole-dns.py";
       # homelab restart
-      hr = "systemctl --user restart homelab.target";
+      hrh = "systemctl --user restart homelab.target";
+      # homelab restart specific service
+      hr = "systemctl --user restart";
     };
 
     shellInit = ''

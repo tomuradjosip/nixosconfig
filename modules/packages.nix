@@ -17,6 +17,7 @@
       vim
       wget
       git
+      jq
       nixfmt-rfc-style # For formatting nix files
       htop
       pre-commit

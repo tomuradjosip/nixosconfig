@@ -36,15 +36,17 @@
       mcd = "cd /bulk/media";
 
       # homelab sync homelab
-      hsh = "/containers/homelab/scripts/sync-homelab.sh";
+      hsync = "/containers/homelab/scripts/sync-homelab.sh";
       # homelab status
-      hst = "/containers/homelab/scripts/status-homelab.sh";
+      hstatus = "/containers/homelab/scripts/status-homelab.sh";
       # homelab sync pihole
-      hsp = "/containers/homelab/scripts/sync-pihole-dns.py";
+      hpihole = "/containers/homelab/scripts/sync-pihole-dns.py";
       # homelab restart
-      hrh = "systemctl --user restart homelab.target";
+      hrestart = "systemctl --user restart homelab.target";
       # homelab restart specific service
-      hr = "systemctl --user restart";
+      hrestart-service = "systemctl --user restart";
+      # homelab journal logs
+      hjournal = "journalctl -e --user-unit";
     };
 
     shellInit = ''

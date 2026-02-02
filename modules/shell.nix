@@ -12,11 +12,11 @@
     enable = true;
     shellAliases = {
       # NixOS rebuild aliases
-      rb = "sudo nixos-rebuild switch --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
-      rbt = "sudo nixos-rebuild test --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
+      rb = "sudo nixos-rebuild switch --impure --flake $HOME/nixosconfig#$(hostname)";
+      rbt = "sudo nixos-rebuild test --impure --flake $HOME/nixosconfig#$(hostname)";
 
       # Reset ssh agent
-      creds = "ssh-add -D; ssh-add /home/${secrets.username}/.ssh/${secrets.sshPrivateKeyFilename}";
+      creds = "ssh-add -D; for pub in $HOME/.ssh/*.pub; do ssh-add \"\${pub%.pub}\"; done";
 
       # Git aliases
       new = "git push --set-upstream origin $(git branch --show-current)";
@@ -59,7 +59,7 @@
       acpf() { if [ -f .pre-commit-config.yaml ]; then git add .; pre-commit run -a; fi; git add .; git commit -m "$1" && git push --force-with-lease --force-if-includes; }
 
       # Initialize oh-my-posh with custom theme
-      eval "$(oh-my-posh init zsh --config /home/${secrets.username}/nixosconfig/themes/terminal_theme.json)"
+      eval "$(oh-my-posh init zsh --config $HOME/nixosconfig/themes/terminal_theme.json)"
     '';
 
     ohMyZsh = {
@@ -82,8 +82,8 @@
   programs.bash = {
     shellAliases = {
       # Same aliases available in bash
-      rb = "sudo nixos-rebuild switch --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
-      rbt = "sudo nixos-rebuild test --impure --flake /home/${secrets.username}/nixosconfig#${secrets.hostname}";
+      rb = "sudo nixos-rebuild switch --impure --flake $HOME/nixosconfig#$(hostname)";
+      rbt = "sudo nixos-rebuild test --impure --flake $HOME/nixosconfig#$(hostname)";
     };
   };
 }

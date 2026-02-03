@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "aliases": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1770117794,
+        "narHash": "sha256-Ctj7ZMfy73J+DaDawRk/5/sPwKU2N24gSe1RjzkqzC0=",
+        "owner": "tomuradjosip",
+        "repo": "aliases",
+        "rev": "6ac48fe19c9c3edec2b81dd848fb1c4263249059",
+        "type": "github"
+      },
+      "original": {
+        "owner": "tomuradjosip",
+        "repo": "aliases",
+        "type": "github"
+      }
+    },
     "impermanence": {
       "locked": {
         "lastModified": 1737831083,
@@ -33,6 +49,7 @@
     },
     "root": {
       "inputs": {
+        "aliases": "aliases",
         "impermanence": "impermanence",
         "nixpkgs": "nixpkgs"
       }

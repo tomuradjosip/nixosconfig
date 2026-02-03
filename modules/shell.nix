@@ -15,6 +15,7 @@
     shellInit = ''
       # Set aliases directory for help function
       export ALIASES_DIR="${inputs.aliases}"
+      export NIXOS_FLAKE="$HOME/nixosconfig"
 
       # Source shared aliases from GitHub repo
       source ${inputs.aliases}/core.zsh

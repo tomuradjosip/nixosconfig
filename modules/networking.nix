@@ -27,13 +27,19 @@
     };
   };
 
+  # Disable IPv6 completely (no IPv6 connectivity available, prevents timeout delays)
+  # Kernel boot parameter is the most reliable method
+  boot.kernelParams = [ "ipv6.disable=1" ];
+
   # Kernel parameters
   boot.kernel.sysctl = {
     # Allow rootless podman to bind to privileged ports (80/443 for Traefik)
     "net.ipv4.ip_unprivileged_port_start" = 80;
-    # Disable IPv6 (no IPv6 connectivity available, prevents timeout delays)
-    "net.ipv6.conf.all.disable_ipv6" = 1;
-    "net.ipv6.conf.default.disable_ipv6" = 1;
+  };
+
+  # Prevent NetworkManager from enabling IPv6 on any connection
+  networking.networkmanager.connectionConfig = {
+    "ipv6.method" = "disabled";
   };
 
   # Enable SSH server with secure settings
@@ -51,6 +57,7 @@
       AllowAgentForwarding no
       AllowStreamLocalForwarding no
       AuthenticationMethods publickey
+      AddressFamily inet
     '';
   };
 }

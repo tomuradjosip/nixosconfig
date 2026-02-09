@@ -27,9 +27,13 @@
     };
   };
 
-  # Kernel parameters for rootless podman
+  # Kernel parameters
   boot.kernel.sysctl = {
+    # Allow rootless podman to bind to privileged ports
     "net.ipv4.ip_unprivileged_port_start" = 53;
+    # Disable IPv6 (no IPv6 connectivity available, prevents timeout delays)
+    "net.ipv6.conf.all.disable_ipv6" = 1;
+    "net.ipv6.conf.default.disable_ipv6" = 1;
   };
 
   # Enable SSH server with secure settings

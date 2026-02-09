@@ -13,6 +13,7 @@ in
     /etc/secrets/config/hardware-configuration.nix
     ./modules/storage.nix
     ./modules/networking.nix
+    ./modules/adguard.nix
     ./modules/users.nix
     ./modules/packages.nix
     ./modules/shell.nix

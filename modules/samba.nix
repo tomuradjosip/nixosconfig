@@ -18,7 +18,7 @@
         "server string" = secrets.hostname;
         "netbios name" = secrets.hostname;
         "security" = "user";
-        "hosts allow" = "${secrets.ipRange} 127.0.0.1 localhost";
+        "hosts allow" = "${secrets.ipRangeSamba} 127.0.0.1 localhost";
         "hosts deny" = "0.0.0.0/0";
       };
       bulk = {

@@ -22,8 +22,7 @@
 
   services.adguardhome = {
     enable = true;
-    # Web UI bound to localhost only (accessed via Traefik reverse proxy)
-    host = "127.0.0.1";
+    host = "0.0.0.0";
     port = 3000;
     # Allow settings to be changed through the web UI
     mutableSettings = true;

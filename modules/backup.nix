@@ -24,9 +24,12 @@ let
     # What to backup (add/remove paths as needed)
     backupPaths = [
       "/home/${secrets.username}/.ssh"
+      "/home/${secrets.username}/nixosconfig"
       "/etc/secrets"
       "/containers/homelab"
       "/bulk/mikrotik"
+      "/var/lib/AdGuardHome"
+      "/var/lib/samba"
     ];
 
     # What to exclude from backups
@@ -48,6 +51,45 @@ let
     enableWeeklyCheck = true; # Run integrity checks on Mondays
     logDir = "/var/log/restic"; # Where to store backup logs
     cacheDir = "/var/lib/restic"; # Where to store Restic cache
+
+    #############################################################################
+    # PRE-BACKUP DATABASE DUMPS
+    #
+    # Databases need consistent dumps before Restic snapshots them.
+    # Add entries here when new services with databases are added.
+    # Dump files are written alongside the source DB and picked up by Restic.
+    #############################################################################
+
+    # SQLite databases: { name, path }
+    # Dumps to <path>.backup using sqlite3 .backup command
+    sqliteDumps = [
+      {
+        name = "vaultwarden";
+        path = "/containers/homelab/appdata/vaultwarden/data/db.sqlite3";
+      }
+      {
+        name = "vikunja";
+        path = "/containers/homelab/appdata/vikunja/vikunja.db";
+      }
+    ];
+
+    # PostgreSQL databases: { name, container, user, database, outputPath }
+    # Dumps via podman exec using pg_dump
+    postgresDumps = [
+      # Uncomment when Immich is re-enabled:
+      # {
+      #   name = "immich";
+      #   container = "immich-postgres";
+      #   user = "postgres";
+      #   database = "immich";
+      #   outputPath = "/containers/homelab/appdata/immich/backups/pg_dump.sql";
+      # }
+    ];
+  };
+
+  preBackupDumpsPackage = pkgs.callPackage ../packages/pre-backup-dumps.nix {
+    sqliteDumps = backupConfig.sqliteDumps;
+    postgresDumps = backupConfig.postgresDumps;
   };
 
   resticBackupPackage = pkgs.callPackage ../packages/restic-backup.nix {
@@ -100,6 +142,7 @@ in
     ]; # Prevent concurrent operations with SnapRAID
     serviceConfig = {
       Type = "oneshot";
+      ExecStartPre = "${preBackupDumpsPackage}/bin/pre-backup-dumps";
       ExecStart = "${resticBackupPackage}/bin/restic-backup";
       EnvironmentFile = "/etc/restic/environment";
       User = "root";
@@ -111,7 +154,10 @@ in
         backupConfig.repositoryPath
         backupConfig.logDir
         backupConfig.cacheDir
-      ];
+      ]
+      # Allow writing dump files next to source databases
+      ++ map (db: builtins.dirOf db.path) backupConfig.sqliteDumps
+      ++ map (db: builtins.dirOf db.outputPath) backupConfig.postgresDumps;
     };
   };
 

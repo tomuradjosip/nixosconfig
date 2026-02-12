@@ -34,11 +34,48 @@ let
 
     # What to exclude from backups
     excludePatterns = [
+      # General temp/dev files
       "*.tmp"
       "*.temp"
+      "*/cache/*"
       "*/.cache/*"
       "*/node_modules/*"
       "*/.git/*"
+
+      # SQLite WAL/journal files (we have proper .backup dumps)
+      "*-shm"
+      "*-wal"
+
+      # Application logs (not useful for restore)
+      "*/logs/*"
+      "*/log/*"
+      "*/logs.db"
+      "*.pid"
+
+      # Prowlarr bundled indexer definitions (regenerated on update)
+      "*/prowlarr/Definitions/*"
+
+      # Profilarr TRaSH Guide data (synced/regenerated, not user config)
+      "*/profilarr/db/*"
+
+      # Crash telemetry
+      "*/Sentry/*"
+
+      # Cached media artwork (re-fetched from metadata providers)
+      "*/MediaCover/*"
+
+      # Vaultwarden favicon cache (regenerated automatically)
+      "*/icon_cache/*"
+
+      # GeoIP databases (re-downloaded)
+      "*/GeoDB/*"
+
+      # Jellyfin cached metadata/artwork (re-fetched from TMDB/TVDB)
+      "*/jellyfin/config/metadata/*"
+
+      # AdGuard Home downloaded filter lists (refreshed automatically)
+      "*/AdGuardHome/data/filters/*"
+      "*/AdGuardHome/data/querylog.json"
     ];
 
     # Backup identification and retention

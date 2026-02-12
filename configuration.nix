@@ -22,6 +22,7 @@ in
     ./modules/backup.nix
     ./modules/samba.nix
     ./modules/mikrotik-backup.nix
+    ./modules/monitoring.nix
   ];
 
   # Enable flakes

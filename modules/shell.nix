@@ -11,8 +11,13 @@
   # Enable zsh system-wide
   programs.zsh = {
     enable = true;
-
     shellInit = ''
+      # Create .zshrc if missing to prevent zsh-newuser-install wizard (wiped by impermanence)
+      [[ -f ~/.zshrc ]] || touch ~/.zshrc
+
+      # Point history directly at persistent storage (avoids cross-device rename error with impermanence)
+      HISTFILE=/persist/home/${secrets.username}/.zsh_history
+
       # Set aliases directory for help function
       export ALIASES_DIR="${inputs.aliases}"
       export NIXOS_FLAKE="$HOME/nixosconfig"

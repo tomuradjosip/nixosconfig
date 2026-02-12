@@ -34,7 +34,6 @@
     ];
     files = [
       "/etc/machine-id" # Unique system identifier used by many services
-      "/home/${secrets.username}/.zsh_history" # Zsh command history
     ];
   };
 }

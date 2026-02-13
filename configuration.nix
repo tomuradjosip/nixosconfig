@@ -20,6 +20,7 @@ in
     ./modules/persistence.nix
     ./modules/localization.nix
     ./modules/backup.nix
+    ./modules/backrest.nix
     ./modules/samba.nix
     ./modules/mikrotik-backup.nix
     ./modules/monitoring.nix

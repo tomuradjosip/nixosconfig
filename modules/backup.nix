@@ -139,6 +139,48 @@ let
     ];
   };
 
+  #############################################################################
+  # MEDIA BACKUP CONFIGURATION
+  #
+  # Backs up media files directly to a separate Restic repo on Hetzner.
+  # No local repo — uploads directly over SFTP.
+  #############################################################################
+
+  mediaBackupConfig = {
+    repositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-media";
+    sshPort = 23;
+
+    # What to backup (add/remove paths as needed)
+    backupPaths = [
+      "/bulk/Elements"
+    ];
+
+    excludePatterns = [
+      "*.tmp"
+      "*.temp"
+    ];
+
+    backupTag = "media-scheduled";
+    keepDaily = 7;
+    keepWeekly = 4;
+    keepMonthly = 6;
+  };
+
+  resticMediaBackupPackage = pkgs.callPackage ../packages/restic-media-backup.nix {
+    remoteRepositoryPath = mediaBackupConfig.repositoryPath;
+    sshPort = mediaBackupConfig.sshPort;
+    sshUser = secrets.storageBoxUser;
+    sshHost = "${secrets.storageBoxUser}.your-storagebox.de";
+    backupPaths = mediaBackupConfig.backupPaths;
+    excludePatterns = mediaBackupConfig.excludePatterns;
+    backupTag = mediaBackupConfig.backupTag;
+    keepDaily = mediaBackupConfig.keepDaily;
+    keepWeekly = mediaBackupConfig.keepWeekly;
+    keepMonthly = mediaBackupConfig.keepMonthly;
+    logDir = backupConfig.logDir;
+    cacheDir = backupConfig.cacheDir;
+  };
+
   preBackupDumpsPackage = pkgs.callPackage ../packages/pre-backup-dumps.nix {
     sqliteDumps = backupConfig.sqliteDumps;
     postgresDumps = backupConfig.postgresDumps;
@@ -233,6 +275,9 @@ in
   # Systemd service for offsite copy (chained from restic-backup via OnSuccess)
   systemd.services.restic-offsite-copy = {
     description = "Copy Restic snapshots to Hetzner Storage Box";
+    unitConfig = {
+      OnSuccess = "restic-media-backup.service"; # Chain media backup on success
+    };
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${resticOffsiteCopyPackage}/bin/restic-offsite-copy";
@@ -247,6 +292,31 @@ in
         backupConfig.logDir
         backupConfig.cacheDir
         "/root/.ssh" # SSH known_hosts for Hetzner Storage Box
+      ];
+    };
+  };
+
+  # Systemd service for media backup (direct to Hetzner)
+  systemd.services.restic-media-backup = {
+    description = "Restic media backup to Hetzner Storage Box";
+    after = [ "local-fs.target" ];
+    conflicts = [
+      "snapraid-sync.service"
+      "snapraid-scrub.service"
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${resticMediaBackupPackage}/bin/restic-media-backup";
+      EnvironmentFile = "/etc/restic/environment";
+      User = "root";
+      Group = "root";
+      PrivateTmp = true;
+      ProtectHome = "read-only";
+      ProtectSystem = "strict";
+      ReadWritePaths = [
+        backupConfig.logDir
+        backupConfig.cacheDir
+        "/root/.ssh"
       ];
     };
   };

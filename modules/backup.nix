@@ -90,6 +90,21 @@ let
     cacheDir = "/var/lib/restic"; # Where to store Restic cache
 
     #############################################################################
+    # OFFSITE BACKUP TO HETZNER STORAGE BOX
+    #
+    # After the local backup succeeds, snapshots are copied to a remote Restic
+    # repo on a Hetzner Storage Box via SFTP. Same password as local repo.
+    #############################################################################
+
+    offsite = {
+      repositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-repo";
+      sshPort = 23; # Hetzner Storage Box uses port 23
+      keepDaily = 7;
+      keepWeekly = 4;
+      keepMonthly = 12;
+    };
+
+    #############################################################################
     # PRE-BACKUP DATABASE DUMPS
     #
     # Databases need consistent dumps before Restic snapshots them.
@@ -127,6 +142,20 @@ let
   preBackupDumpsPackage = pkgs.callPackage ../packages/pre-backup-dumps.nix {
     sqliteDumps = backupConfig.sqliteDumps;
     postgresDumps = backupConfig.postgresDumps;
+  };
+
+  resticOffsiteCopyPackage = pkgs.callPackage ../packages/restic-offsite-copy.nix {
+    localRepositoryPath = backupConfig.repositoryPath;
+    remoteRepositoryPath = backupConfig.offsite.repositoryPath;
+    sshPort = backupConfig.offsite.sshPort;
+    sshUser = secrets.storageBoxUser;
+    sshHost = "${secrets.storageBoxUser}.your-storagebox.de";
+    backupTag = backupConfig.backupTag;
+    keepDaily = backupConfig.offsite.keepDaily;
+    keepWeekly = backupConfig.offsite.keepWeekly;
+    keepMonthly = backupConfig.offsite.keepMonthly;
+    logDir = backupConfig.logDir;
+    cacheDir = backupConfig.cacheDir;
   };
 
   resticBackupPackage = pkgs.callPackage ../packages/restic-backup.nix {
@@ -177,6 +206,9 @@ in
       "snapraid-sync.service"
       "snapraid-scrub.service"
     ]; # Prevent concurrent operations with SnapRAID
+    unitConfig = {
+      OnSuccess = "restic-offsite-copy.service"; # Chain offsite copy on success
+    };
     serviceConfig = {
       Type = "oneshot";
       ExecStartPre = "${preBackupDumpsPackage}/bin/pre-backup-dumps";
@@ -195,6 +227,27 @@ in
       # Allow writing dump files next to source databases
       ++ map (db: builtins.dirOf db.path) backupConfig.sqliteDumps
       ++ map (db: builtins.dirOf db.outputPath) backupConfig.postgresDumps;
+    };
+  };
+
+  # Systemd service for offsite copy (chained from restic-backup via OnSuccess)
+  systemd.services.restic-offsite-copy = {
+    description = "Copy Restic snapshots to Hetzner Storage Box";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${resticOffsiteCopyPackage}/bin/restic-offsite-copy";
+      EnvironmentFile = "/etc/restic/environment";
+      User = "root";
+      Group = "root";
+      PrivateTmp = true;
+      ProtectHome = "read-only";
+      ProtectSystem = "strict";
+      ReadWritePaths = [
+        backupConfig.repositoryPath # Local repo (restic copy needs to write lock files)
+        backupConfig.logDir
+        backupConfig.cacheDir
+        "/root/.ssh" # SSH known_hosts for Hetzner Storage Box
+      ];
     };
   };
 

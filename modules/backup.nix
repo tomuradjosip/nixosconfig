@@ -296,14 +296,10 @@ in
     };
   };
 
-  # Systemd service for media backup (direct to Hetzner)
+  # Systemd service for media backup (chained from restic-offsite-copy; conflicts on restic-backup prevent SnapRAID overlap)
   systemd.services.restic-media-backup = {
     description = "Restic media backup to Hetzner Storage Box";
     after = [ "local-fs.target" ];
-    conflicts = [
-      "snapraid-sync.service"
-      "snapraid-scrub.service"
-    ];
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${resticMediaBackupPackage}/bin/restic-media-backup";

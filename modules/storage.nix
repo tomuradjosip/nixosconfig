@@ -172,7 +172,7 @@
       # System generation cleanup service - more intelligent than nix-collect-garbage
       system-profile-cleanup = {
         description = "Intelligent system profile cleaner";
-        startAt = "daily";
+        startAt = "07:00";
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${
@@ -189,6 +189,7 @@
         description = "SnapRAID sync operation";
         conflicts = [
           "restic-backup.service"
+          "restic-media-backup.service"
           "snapraid-scrub.service"
         ]; # Prevent concurrent operations with Restic backup and SnapRAID scrub
         serviceConfig = {
@@ -202,6 +203,7 @@
         description = "SnapRAID scrub operation";
         conflicts = [
           "restic-backup.service"
+          "restic-media-backup.service"
           "snapraid-sync.service"
         ]; # Prevent concurrent operations with Restic backup and SnapRAID sync
         serviceConfig = {
@@ -264,9 +266,9 @@
         description = "Run SnapRAID scrub weekly";
         wantedBy = [ "timers.target" ];
         timerConfig = {
-          OnCalendar = "weekly";
+          OnCalendar = "Sun 02:00";
           Persistent = true;
-          RandomizedDelaySec = "2h";
+          RandomizedDelaySec = "30m";
         };
       };
     })
@@ -279,7 +281,7 @@
       "rpool"
     ]
     ++ lib.optionals (secrets.diskIds ? dataPrimary && secrets.diskIds ? dataSecondary) [ "dpool" ];
-    autoScrub.interval = "daily";
+    autoScrub.interval = "*-*-* 06:00:00";
     trim.enable = true;
     trim.interval = "weekly";
   };

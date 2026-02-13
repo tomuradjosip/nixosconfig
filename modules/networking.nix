@@ -50,7 +50,7 @@
       KbdInteractiveAuthentication = false;
       PermitRootLogin = "no";
     };
-    allowSFTP = false; # Don't set this if you need sftp
+    allowSFTP = true; # Required for restic external machines backup (sftp:... repo)
     extraConfig = ''
       AllowTcpForwarding yes
       X11Forwarding no

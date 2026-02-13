@@ -19,7 +19,7 @@ let
 
   backupConfig = {
     # Repository location
-    repositoryPath = "/bulk/backup"; # Where to store backups
+    repositoryPath = "/bulk/backup/nixos-server"; # Where to store backups
 
     # What to backup (add/remove paths as needed)
     backupPaths = [

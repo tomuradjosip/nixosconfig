@@ -244,10 +244,6 @@ in
   systemd.services.restic-backup = {
     description = "Restic scheduled backup service";
     after = [ "local-fs.target" ]; # Wait for /bulk to be mounted
-    conflicts = [
-      "snapraid-sync.service"
-      "snapraid-scrub.service"
-    ]; # Prevent concurrent operations with SnapRAID
     unitConfig = {
       OnSuccess = "restic-offsite-copy.service"; # Chain offsite copy on success
     };
@@ -296,7 +292,7 @@ in
     };
   };
 
-  # Systemd service for media backup (chained from restic-offsite-copy; conflicts on restic-backup prevent SnapRAID overlap)
+  # Systemd service for media backup (chained from restic-offsite-copy)
   systemd.services.restic-media-backup = {
     description = "Restic media backup to Hetzner Storage Box";
     after = [ "local-fs.target" ];

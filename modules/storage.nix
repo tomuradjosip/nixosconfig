@@ -187,11 +187,6 @@
       # SnapRAID sync service
       "snapraid-sync" = {
         description = "SnapRAID sync operation";
-        conflicts = [
-          "restic-backup.service"
-          "restic-media-backup.service"
-          "snapraid-scrub.service"
-        ]; # Prevent concurrent operations with Restic backup and SnapRAID scrub
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${pkgs.snapraid}/bin/snapraid sync";
@@ -201,11 +196,6 @@
       # SnapRAID scrub service
       "snapraid-scrub" = {
         description = "SnapRAID scrub operation";
-        conflicts = [
-          "restic-backup.service"
-          "restic-media-backup.service"
-          "snapraid-sync.service"
-        ]; # Prevent concurrent operations with Restic backup and SnapRAID sync
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${pkgs.snapraid}/bin/snapraid scrub -p 10";

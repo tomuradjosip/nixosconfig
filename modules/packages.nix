@@ -52,13 +52,6 @@
   # Need this for vscode-server
   programs.nix-ld.enable = true;
 
-  # Docker configuration
-  virtualisation.docker = {
-    enable = true;
-    storageDriver = "zfs";
-    extraOptions = "--data-root=/containers/var/lib/docker";
-  };
-
   # Podman configuration
   virtualisation.containers.enable = true;
   virtualisation.containers.storage.settings = {

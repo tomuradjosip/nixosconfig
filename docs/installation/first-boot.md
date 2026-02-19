@@ -106,7 +106,6 @@ environment.systemPackages = with pkgs; [
   # Add your packages here
   firefox
   code-server
-  docker
 ];
 ```
 
@@ -118,7 +117,7 @@ Edit appropriate module files to enable services:
 ```nix
 # In modules/networking.nix for network services
 # In configuration.nix for system services
-services.docker.enable = true;  # Example
+virtualisation.podman.enable = true;  # Example
 ```
 
 Then rebuild using the `rb` command.

@@ -22,7 +22,6 @@
     extraGroups = [
       "wheel"
       "networkmanager"
-      "docker"
       "podman"
       "systemd-journal"
     ];

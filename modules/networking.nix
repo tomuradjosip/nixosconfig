@@ -16,13 +16,30 @@
       allowedTCPPorts = [
         22
         53
+        # Traefik
         80
         443
+        7443
+        # Coturn TURN/STUN for PairDrop
+        3478
+        5349
+        # qBittorrent
         49694
       ];
       allowedUDPPorts = [
         53
+        # Coturn TURN/STUN for PairDrop
+        3478
+        5349
+        # qBittorrent
         49694
+      ];
+      # Coturn TURN/STUN relay port range for PairDrop
+      allowedUDPPortRanges = [
+        {
+          from = 10000;
+          to = 20000;
+        }
       ];
     };
   };

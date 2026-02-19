@@ -46,6 +46,13 @@ let
       "*-shm"
       "*-wal"
 
+      # Prometheus TSDB (time-series data; large, restorable from scrape)
+      "*/prometheus/data/*"
+
+      # Grafana plugins (re-installable; large) and rendered image cache
+      "*/grafana/plugins/*"
+      "*/grafana/png/*"
+
       # Application logs (not useful for restore)
       "*/logs/*"
       "*/log/*"

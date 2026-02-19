@@ -30,6 +30,15 @@
           "/.DS_Store/._.*/.Trashes/.TemporaryItems/.Spotlight-V100/.fseventsd/.VolumeIcon.icns/.DocumentRevisions-V100/.ql_*/";
         "delete veto files" = "yes";
       };
+      tmp-backup = {
+        "path" = "/persist/backup";
+        "read only" = "no";
+        "guest ok" = "no";
+        "force user" = secrets.username;
+        "veto files" =
+          "/.DS_Store/._.*/.Trashes/.TemporaryItems/.Spotlight-V100/.fseventsd/.VolumeIcon.icns/.DocumentRevisions-V100/.ql_*/";
+        "delete veto files" = "yes";
+      };
     };
   };
 

@@ -104,7 +104,7 @@ let
     #############################################################################
 
     offsite = {
-      repositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-repo";
+      repositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./nixos-server";
       sshPort = 23; # Hetzner Storage Box uses port 23
       keepDaily = 7;
       keepWeekly = 4;
@@ -155,7 +155,7 @@ let
 
   laptopJosipOffsite = {
     localRepositoryPath = "/bulk/backup/laptop-josip";
-    remoteRepositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-repo-laptop-josip";
+    remoteRepositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./laptop-josip";
     sshPort = 23;
     backupTag = "macos-laptop"; # Tag used in the source repo for snapshots to copy
     keepDaily = 7;

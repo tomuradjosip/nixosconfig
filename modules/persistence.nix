@@ -20,6 +20,7 @@
       "/var/lib/AdGuardHome" # AdGuard Home config, query logs, and filter lists
       "/var/lib/restic" # Restic cache
       "/var/lib/backrest" # Backrest app data
+      "/etc/backrest" # Backrest config (preserves UI auth/users across reboot)
       "/etc/NetworkManager/system-connections" # Saved WiFi passwords and network configs
       "/root/.ssh" # Root SSH known_hosts (for Hetzner Storage Box offsite backup)
       # User-specific directories

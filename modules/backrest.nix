@@ -1,6 +1,8 @@
 # Backrest: Web UI for browsing and restoring restic repositories.
-# Repos are added programmatically from the config below; passwords come from
-# password files (no secrets in the generated config).
+# Repos are defined in secrets.backrestRepos (id, uri, password, guid). The user
+# must obtain guid manually via `restic -r <uri> cat config --json` (use the "id" field).
+# /etc/backrest is persisted so UI auth (users) is preserved across reboot; an activation
+# script merges instance and repos from Nix into existing config without wiping auth.
 
 {
   config,
@@ -11,67 +13,68 @@
 }:
 
 let
-  # Single password file for all repos (contents: secrets.backupPassword from secrets.nix).
-  passwordFile = "/etc/restic/backrest-password";
+  repos = secrets.backrestRepos or [ ];
+  instance = secrets.hostname;
 
-  # Repos to show in Backrest UI. All use the same password (secrets.backupPassword).
-  # URI can be local path or sftp:user@host:/path (SFTP needs ssh in PATH; Hetzner uses port 23 in ~/.ssh/config).
-  #
-  # For existing repos you must set `guid` to the restic repository ID. Get it with:
-  #   RESTIC_PASSWORD_FILE=/etc/restic/backrest-password restic -r <uri> cat config --json
-  # then use the "id" field as guid. For new (not yet initialized) repos use autoInitialize = true instead.
-  repos = [
-    {
-      id = "nixos-server";
-      uri = "/bulk/backup/nixos-server";
-      guid = "f050eb4e5f1b75383ae0a607dcd0b6eb41a8e2461d2c64dcb9c012b661209e82";
-    }
-    {
-      id = "laptop-josip";
-      uri = "/bulk/backup/laptop-josip";
-      guid = "d26c51372bcf7067bf020f42c2eff5cbdfa237845669d444cceba123428f979c";
-    }
-    # {
-    #   id = "restic-media";
-    #   uri = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-media";
-    #   guid = "REPLACE_ME";
-    # }
-  ];
+  repoToJson = repo: {
+    id = repo.id;
+    uri = repo.uri;
+    guid = repo.guid;
+    env = [ "RESTIC_PASSWORD_FILE=/etc/restic/backrest-password-${repo.id}" ];
+  };
 
-  # Build Backrest config JSON (camelCase keys per proto).
-  # Existing repos: set guid (from restic cat config --json "id"). New repos: set autoInitialize = true.
-  repoToJson =
-    repo:
-    let
-      base = {
-        id = repo.id;
-        uri = repo.uri;
-        env = [ "RESTIC_PASSWORD_FILE=${passwordFile}" ];
-      };
-      withGuid = if (repo.guid or "") != "" then base // { guid = repo.guid; } else base;
-      withAutoInit =
-        if repo.autoInitialize or false then withGuid // { autoInitialize = true; } else withGuid;
-    in
-    withAutoInit;
-  backrestConfig = builtins.toJSON {
+  # Seed file: instance + repos from Nix. Activation script merges this into
+  # existing config.json (if any) so we never wipe auth/users.
+  reposFromNix = builtins.toJSON {
     modno = 0;
     version = 6;
-    instance = secrets.hostname or "nixos-backrest";
+    inherit instance;
     repos = map repoToJson repos;
   };
 
+  mergeScript = pkgs.writeShellScript "backrest-merge-config" ''
+    set -euo pipefail
+    SEED="/etc/backrest/repos-from-nix.json"
+    CONFIG="/etc/backrest/config.json"
+    export PATH="${lib.makeBinPath [ pkgs.jq ]}:$PATH"
+
+    if [ -f "$CONFIG" ]; then
+      # Merge: keep existing auth etc., overwrite only modno, version, instance, repos
+      # (.[0] | . + ...) would make . = config so .[1] fails; keep . as array
+      jq -s '(.[0]) + {modno: 0, version: 6, instance: .[1].instance, repos: .[1].repos}' "$CONFIG" "$SEED" > "$CONFIG.tmp"
+      chmod 600 "$CONFIG.tmp"
+      mv "$CONFIG.tmp" "$CONFIG"
+    else
+      # First run: copy seed as initial config (no auth yet)
+      cp "$SEED" "$CONFIG"
+      chmod 600 "$CONFIG"
+    fi
+  '';
 in
 {
-  # Single password file for all Backrest repos (secrets.backupPassword from secrets.nix).
-  environment.etc."restic/backrest-password" = {
-    text = secrets.backupPassword;
-    mode = "0600";
-  };
+  # Per-repo password files (from secrets.backrestRepos)
+  environment.etc = lib.mkMerge (
+    (map (repo: {
+      "restic/backrest-password-${repo.id}" = {
+        text = repo.password;
+        mode = "0600";
+      };
+    }) repos)
+    ++ [
+      {
+        "backrest/repos-from-nix.json" = {
+          text = reposFromNix;
+          mode = "0600";
+        };
+      }
+    ]
+  );
 
-  # Backrest config (no secrets inside, only env pointing to password files)
-  environment.etc."backrest/config.json" = {
-    text = backrestConfig;
-    mode = "0600";
+  system.activationScripts.backrestConfig = {
+    deps = [ "etc" ];
+    text = ''
+      ${mergeScript}
+    '';
   };
 
   systemd.tmpfiles.rules = [
@@ -90,8 +93,6 @@ in
     serviceConfig = {
       Type = "simple";
       Restart = "on-failure";
-      # Restic and SSH (for SFTP repos) must be on PATH.
-      # HOME/XDG_CACHE_HOME so restic can use a cache dir and won't print to stdout (breaks JSON parsing).
       Environment = [
         "BACKREST_CONFIG=/etc/backrest/config.json"
         "BACKREST_DATA=/var/lib/backrest"

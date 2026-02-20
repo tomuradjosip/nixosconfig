@@ -24,17 +24,17 @@ let
     {
       id = "nixos-server";
       uri = "/bulk/backup/nixos-server";
-      guid = "f050eb4e5f1b75383ae0a607dcd0b6eb41a8e2461d2c64dcb9c012b661209e82"; # sudo restic -r /bulk/backup/nixos-server cat config --json → "id"
+      guid = "f050eb4e5f1b75383ae0a607dcd0b6eb41a8e2461d2c64dcb9c012b661209e82";
     }
     {
       id = "laptop-josip";
-      uri = "/persist/backup/laptop-josip";
-      guid = "d26c51372bcf7067bf020f42c2eff5cbdfa237845669d444cceba123428f979c"; # restic -r /persist/backup/laptop-josip cat config --json → "id"
+      uri = "/bulk/backup/laptop-josip";
+      guid = "d26c51372bcf7067bf020f42c2eff5cbdfa237845669d444cceba123428f979c";
     }
     # {
     #   id = "restic-media";
     #   uri = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-media";
-    #   guid = "REPLACE_ME";  # restic -r "sftp:.../restic-media" cat config --json → "id"
+    #   guid = "REPLACE_ME";
     # }
   ];
 

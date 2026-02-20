@@ -147,6 +147,23 @@ let
   };
 
   #############################################################################
+  # LAPTOP-JOSIP REPO OFFSITE COPY
+  #
+  # Copies the existing Restic repo at /bulk/backup/laptop-josip to Hetzner
+  # Storage Box (same password as other repos).
+  #############################################################################
+
+  laptopJosipOffsite = {
+    localRepositoryPath = "/bulk/backup/laptop-josip";
+    remoteRepositoryPath = "sftp:${secrets.storageBoxUser}@${secrets.storageBoxUser}.your-storagebox.de:./restic-repo-laptop-josip";
+    sshPort = 23;
+    backupTag = "macos-laptop"; # Tag used in the source repo for snapshots to copy
+    keepDaily = 7;
+    keepWeekly = 4;
+    keepMonthly = 6;
+  };
+
+  #############################################################################
   # MEDIA BACKUP CONFIGURATION
   #
   # Backs up media files directly to a separate Restic repo on Hetzner.
@@ -203,6 +220,20 @@ let
     keepDaily = backupConfig.offsite.keepDaily;
     keepWeekly = backupConfig.offsite.keepWeekly;
     keepMonthly = backupConfig.offsite.keepMonthly;
+    logDir = backupConfig.logDir;
+    cacheDir = backupConfig.cacheDir;
+  };
+
+  resticLaptopJosipOffsiteCopyPackage = pkgs.callPackage ../packages/restic-offsite-copy.nix {
+    localRepositoryPath = laptopJosipOffsite.localRepositoryPath;
+    remoteRepositoryPath = laptopJosipOffsite.remoteRepositoryPath;
+    sshPort = laptopJosipOffsite.sshPort;
+    sshUser = secrets.storageBoxUser;
+    sshHost = "${secrets.storageBoxUser}.your-storagebox.de";
+    backupTag = laptopJosipOffsite.backupTag;
+    keepDaily = laptopJosipOffsite.keepDaily;
+    keepWeekly = laptopJosipOffsite.keepWeekly;
+    keepMonthly = laptopJosipOffsite.keepMonthly;
     logDir = backupConfig.logDir;
     cacheDir = backupConfig.cacheDir;
   };
@@ -279,7 +310,7 @@ in
   systemd.services.restic-offsite-copy = {
     description = "Copy Restic snapshots to Hetzner Storage Box";
     unitConfig = {
-      OnSuccess = "restic-media-backup.service"; # Chain media backup on success
+      OnSuccess = "restic-laptop-josip-offsite-copy.service"; # Chain laptop-josip offsite copy on success
     };
     serviceConfig = {
       Type = "oneshot";
@@ -299,7 +330,31 @@ in
     };
   };
 
-  # Systemd service for media backup (chained from restic-offsite-copy)
+  # Systemd service for laptop-josip repo offsite copy (chained from restic-offsite-copy)
+  systemd.services.restic-laptop-josip-offsite-copy = {
+    description = "Copy laptop-josip Restic repo to Hetzner Storage Box";
+    unitConfig = {
+      OnSuccess = "restic-media-backup.service"; # Chain media backup on success
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = "${resticLaptopJosipOffsiteCopyPackage}/bin/restic-offsite-copy";
+      EnvironmentFile = "/etc/restic/environment";
+      User = "root";
+      Group = "root";
+      PrivateTmp = true;
+      ProtectHome = "read-only";
+      ProtectSystem = "strict";
+      ReadWritePaths = [
+        laptopJosipOffsite.localRepositoryPath
+        backupConfig.logDir
+        backupConfig.cacheDir
+        "/root/.ssh"
+      ];
+    };
+  };
+
+  # Systemd service for media backup (chained from restic-laptop-josip-offsite-copy)
   systemd.services.restic-media-backup = {
     description = "Restic media backup to Hetzner Storage Box";
     after = [ "local-fs.target" ];

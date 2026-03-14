@@ -9,8 +9,9 @@
 let
   textfileDir = "/var/lib/node_exporter_textfile";
 
-  # Fetches public IP from 6 services round-robin every 5s; writes node_public_ip_info
-  # and node_public_ip_change_timestamp_seconds (last 5 changes) for the textfile collector.
+  # Fetches public IP every 2 minutes (fallback across multiple services).
+  # Writes node_public_ip_info gauge for the textfile collector.
+  # IP is a label so Prometheus stores full address history automatically.
   fetchPublicIpScript = pkgs.writeShellScript "fetch-public-ip" ''
     set -euo pipefail
     DIR="${textfileDir}"
@@ -23,48 +24,33 @@ let
       "https://checkip.amazonaws.com"
       "https://wtfismyip.com/text"
     )
-    SOURCES=("api.ipify.org" "ifconfig.me" "icanhazip.com" "checkip.amazonaws.com" "ip.seeip.org" "wtfismyip.com")
-    n=6
-    idx=0
+
     last_ip=""
-    change_ts=()  # up to 5 timestamps, newest first
 
     while true; do
-      url="''${URLS[$idx]}"
-      source="''${SOURCES[$idx]}"
-      idx=$(( (idx + 1) % n ))
-
       ip=""
-      success=0
-      if raw=$(curl -sSf --max-time 5 "$url" 2>/dev/null); then
-        ip=$(printf '%s' "$raw" | tr -d ' \t\n\r')
-        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          success=1
+      for url in "''${URLS[@]}"; do
+        if raw=$(curl -sSf --max-time 5 "$url" 2>/dev/null); then
+          candidate=$(printf '%s' "$raw" | tr -d ' \t\n\r')
+          if [[ "$candidate" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            ip="$candidate"
+            break
+          fi
         fi
-      fi
+      done
 
-      if [[ "$success" -eq 1 && -n "$ip" && "$ip" != "$last_ip" ]]; then
-        ts=$(date +%s)
-        change_ts=("$ts" "''${change_ts[@]:0:4}")
+      if [[ -n "$ip" ]]; then
+        tmp="$DIR/public_ip.prom.$$.tmp"
+        {
+          echo '# HELP node_public_ip_info Current public IP (value=1 when reachable).'
+          echo '# TYPE node_public_ip_info gauge'
+          echo "node_public_ip_info{ip=\"$ip\"} 1"
+        } > "$tmp"
+        mv -f "$tmp" "$DIR/public_ip.prom"
         last_ip="$ip"
       fi
 
-      ip_escaped=$(printf '%s' "$ip" | sed 's/\\/\\\\/g; s/"/\\"/g')
-      tmp="$DIR/public_ip.prom.$$.tmp"
-      {
-        echo '# HELP node_public_ip_info Current public outbound IP from round-robin fetch'
-        echo '# TYPE node_public_ip_info gauge'
-        echo "node_public_ip_info{ip=\"$ip_escaped\",source=\"$source\",success=\"$success\"} $success"
-        echo '# HELP node_public_ip_change_timestamp_seconds Unix timestamp of last 5 public IP changes'
-        echo '# TYPE node_public_ip_change_timestamp_seconds gauge'
-        for i in 0 1 2 3 4; do
-          ts="''${change_ts[$i]:-0}"
-          echo "node_public_ip_change_timestamp_seconds{index=\"$i\"} $ts"
-        done
-      } > "$tmp"
-      mv -f "$tmp" "$DIR/public_ip.prom"
-
-      sleep 15
+      sleep 120
     done
   '';
 

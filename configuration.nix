@@ -16,6 +16,7 @@ in
     ./modules/adguard.nix
     ./modules/users.nix
     ./modules/packages.nix
+    ./modules/virtualization.nix
     ./modules/shell.nix
     ./modules/persistence.nix
     ./modules/localization.nix

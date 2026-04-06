@@ -24,6 +24,7 @@
       "networkmanager"
       "podman"
       "systemd-journal"
+      "libvirtd"
     ];
     hashedPasswordFile = "/persist/etc/secrets/passwords/${secrets.username}";
     openssh.authorizedKeys.keys = secrets.sshKeys;

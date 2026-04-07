@@ -57,7 +57,6 @@
   virtualisation.containers.storage.settings = {
     storage = {
       driver = "zfs";
-      runroot = "/containers/run/containers/storage";
       graphroot = "/containers/var/lib/containers/storage";
     };
   };
@@ -84,7 +83,6 @@
   environment.etc."containers-user-storage-${secrets.username}.conf".text = ''
     [storage]
       driver = "overlay"
-      runroot = "/containers/users/${secrets.username}/run"
       graphroot = "/containers/users/${secrets.username}/storage"
 
     [storage.options]

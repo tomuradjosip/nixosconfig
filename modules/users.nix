@@ -21,7 +21,6 @@
     isNormalUser = true;
     extraGroups = [
       "wheel"
-      "networkmanager"
       "podman"
       "systemd-journal"
       "libvirtd"

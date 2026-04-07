@@ -8,5 +8,9 @@
   virtualisation.libvirtd = {
     enable = true;
     qemu.package = pkgs.qemu_kvm;
+    allowedBridges = [
+      "virbr0"
+      "br0"
+    ];
   };
 }

@@ -1,16 +1,17 @@
-{
-  config,
-  pkgs,
-  lib,
-  secrets,
-  ...
-}:
+{ secrets, ... }:
 
 {
-  # Network configuration
+  # Scripted bridge: physical NIC → br0 (libvirt, Traefik → VMs). NM off avoids br0-netdev EBUSY.
+  # IPv6 stays enabled (no ipv6.disable=1 — dhcpcd needs /proc/sys/net/ipv6).
   networking = {
-    networkmanager.enable = true;
+    useDHCP = false;
     hostId = secrets.zfsHostId;
+    bridges.br0.interfaces = [ secrets.bridgePhysicalInterface ];
+    interfaces = {
+      br0.useDHCP = true;
+      ${secrets.bridgePhysicalInterface}.useDHCP = false;
+    };
+    dhcpcd.allowInterfaces = [ "br0" ];
     firewall = {
       enable = true;
       allowedTCPPorts = [
@@ -44,22 +45,10 @@
     };
   };
 
-  # Disable IPv6 completely (no IPv6 connectivity available, prevents timeout delays)
-  # Kernel boot parameter is the most reliable method
-  # boot.kernelParams = [ "ipv6.disable=1" ];
-
-  # Kernel parameters
   boot.kernel.sysctl = {
-    # Allow rootless podman to bind to privileged ports (80/443 for Traefik)
     "net.ipv4.ip_unprivileged_port_start" = 80;
   };
 
-  # Prevent NetworkManager from enabling IPv6 on any connection
-  # networking.networkmanager.connectionConfig = {
-  #   "ipv6.method" = "disabled";
-  # };
-
-  # Enable SSH server with secure settings
   services.openssh = {
     enable = true;
     settings = {
@@ -74,7 +63,6 @@
       AllowAgentForwarding no
       AllowStreamLocalForwarding no
       AuthenticationMethods publickey
-      AddressFamily inet
     '';
   };
 }

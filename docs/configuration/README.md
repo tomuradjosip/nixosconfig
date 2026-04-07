@@ -37,6 +37,9 @@ The beauty of this modular setup is that behavioral changes are straightforward 
 ### System Settings
 Core system configuration is spread across a few key files. Boot-related settings, including ZFS and ESP (EFI System Partition) sync configuration, are handled in [`modules/storage.nix`](../../modules/storage.nix). Timezone and locale preferences can be adjusted in [`modules/localization.nix`](../../modules/localization.nix), while hardware-specific settings should be updated in your [`hardware-configuration.nix`](../../hardware-configuration.nix) file.
 
+### Home Assistant VM (libvirt)
+To import Home Assistant OS on the LAN bridge **`br0`**, use the commands in **[Home Assistant VM](home-assistant-vm.md)**.
+
 ## Configuration Workflow
 
 1. **Edit** relevant module files

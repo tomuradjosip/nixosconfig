@@ -46,7 +46,7 @@
 
   # Disable IPv6 completely (no IPv6 connectivity available, prevents timeout delays)
   # Kernel boot parameter is the most reliable method
-  boot.kernelParams = [ "ipv6.disable=1" ];
+  # boot.kernelParams = [ "ipv6.disable=1" ];
 
   # Kernel parameters
   boot.kernel.sysctl = {
@@ -55,9 +55,9 @@
   };
 
   # Prevent NetworkManager from enabling IPv6 on any connection
-  networking.networkmanager.connectionConfig = {
-    "ipv6.method" = "disabled";
-  };
+  # networking.networkmanager.connectionConfig = {
+  #   "ipv6.method" = "disabled";
+  # };
 
   # Enable SSH server with secure settings
   services.openssh = {

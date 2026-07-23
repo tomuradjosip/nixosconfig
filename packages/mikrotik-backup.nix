@@ -15,6 +15,8 @@
 # - Runs via systemd service (e.g. mikrotik-backup-main)
 # - Manual execution: systemctl start mikrotik-backup-<name>
 # - Logs: journalctl -u mikrotik-backup-<name>
+# - After replacing a router (host key change): ssh-keygen -R <routerIP>
+#   then re-run the service once so accept-new can record the new key
 
 {
   pkgs,

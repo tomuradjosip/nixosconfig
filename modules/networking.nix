@@ -53,6 +53,8 @@
 
   boot.kernel.sysctl = {
     "net.ipv4.ip_unprivileged_port_start" = 80;
+    # Elasticsearch (Tube Archivist) needs at least 262144 mmap regions
+    "vm.max_map_count" = 262144;
   };
 
   services.openssh = {

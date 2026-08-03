@@ -3,11 +3,11 @@
     "aliases": {
       "flake": false,
       "locked": {
-        "lastModified": 1772832137,
-        "narHash": "sha256-G5xN70RganwCmmePP7mmLYFyHBK7Zn9K3fERA+Dr8LQ=",
+        "lastModified": 1785260830,
+        "narHash": "sha256-CE0z2MMfeh/0LaKpWWX8MmkYWRtNApABpOBxAnS2aEY=",
         "owner": "tomuradjosip",
         "repo": "aliases",
-        "rev": "51b03c500243af8957c4e1a084ef12032b894b29",
+        "rev": "dfc0c240915310d3bcf65c407396a1bef2c60526",
         "type": "github"
       },
       "original": {

@@ -26,6 +26,10 @@
         5349
         # qBittorrent
         49694
+        # RustDesk hbbs/hbbr (no web client ports 21118/21119)
+        21115
+        21116
+        21117
       ];
       allowedUDPPorts = [
         53
@@ -34,6 +38,8 @@
         5349
         # qBittorrent
         49694
+        # RustDesk hbbs ID registration / heartbeat
+        21116
       ];
       # Coturn TURN/STUN relay port range for PairDrop
       allowedUDPPortRanges = [

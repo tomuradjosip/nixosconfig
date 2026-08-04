@@ -22,12 +22,12 @@
       export ALIASES_DIR="${inputs.aliases}"
       export NIXOS_FLAKE="$HOME/nixosconfig"
 
-      # Source shared aliases from GitHub repo
-      source ${inputs.aliases}/core.zsh
-      source ${inputs.aliases}/git.zsh
-      source ${inputs.aliases}/nixos.zsh
-      source ${inputs.aliases}/homelab.zsh
-      source ${inputs.aliases}/help.zsh
+      # Source all *.zsh files from the aliases flake input
+      ${lib.concatMapStringsSep "\n" (name: "      source ${inputs.aliases}/${name}") (
+        builtins.filter (name: lib.hasSuffix ".zsh" name) (
+          builtins.attrNames (builtins.readDir inputs.aliases)
+        )
+      )}
 
       # Environment variables
       export PODMAN_COMPOSE_WARNING_LOGS=false

@@ -44,9 +44,9 @@ Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the gu
 |------|------|
 | `modules/ci-runner-host.nix` | Options, dirs, packages, bridge allowlist |
 | `modules/ci-runner-network.nix` | libvirt network + iptables isolation |
-| `modules/ci-runner-provisioner.nix` | systemd reaper/provisioner timers |
-| `modules/ci-runner-guest.nix` | Guest image definition |
-| `packages/ci-runner-guest-image.nix` | qcow2 image build |
+| `modules/ci-runner-provisioner.nix` | systemd reaper/provisioner/freshness timers |
+| `modules/ci-runner-guest.nix` | Guest image definition (stable NixOS + nix-ld) |
+| `packages/ci-runner-guest-image.nix` | qcow2 image build (guest = `nixpkgs-guest`) |
 | `packages/ci-runner-provisioner.nix` | `ci-runnerctl` |
 
 **systemd:**
@@ -55,7 +55,8 @@ Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the gu
 - `ci-runner-reaper.service` (boot: `reap-boot`, destroys all leftover CI guests)
 - `ci-runner-reaper-soft.service` (periodic: `reap`, never kills running guests)
 - `ci-runner-provisioner.service` (+ timer)
-- timers: `ci-runner-reaper.timer`, `ci-runner-provisioner.timer`
+- `ci-runner-freshness.service` (+ timer, every 12h: runner-version freshness metrics)
+- timers: `ci-runner-reaper.timer`, `ci-runner-provisioner.timer`, `ci-runner-freshness.timer`
 
 **Storage:** `/data/ci/{base,overlays,seeds,state,logs}`
 
@@ -177,16 +178,115 @@ runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]
 
 This repository does not own application workflow YAML.
 
-## Runner version / updates
+## NixOS base
 
-The guest's `github-runner` is pinned from the `nixpkgs-unstable` flake input (stable
-`nixos-25.05` lags behind GitHub's required minimum). The runner is configured with
-`--disableupdate` because it lives in the immutable `/nix/store` and cannot self-update
-(GitHub's in-place `tar -xzf` update fails). GitHub also refuses connections from
-deprecated runner versions, so the version must stay current.
+| Component | Package set | Release |
+|-----------|-------------|---------|
+| Host (provisioner/control plane) | `nixpkgs` | `nixos-25.05` |
+| **Disposable guest** | `nixpkgs-guest` | **`nixos-26.05`** (current supported stable) |
+| `github-runner` only | `nixpkgs-unstable` | current runner |
 
-To update the runner: `nix flake update nixpkgs-unstable`, rebuild the guest image, then
-`install-base` and recycle. Do not rely on GitHub's in-runner auto-update.
+The guest OS is a dedicated flake input (`nixpkgs-guest`) so the disposable image can track
+a **supported stable** NixOS release independently of the host's upgrade cadence. 25.05
+"Warbler" reached end-of-support 2025-12-31; the guest now runs 26.05 "Yarara" (supported
+through 2026-12-31). Only `github-runner` is sourced from unstable (see below).
+
+To move the guest to a newer stable: bump `nixpkgs-guest` in `flake.nix`/`flake.lock`,
+rebuild the guest image, validate, `install-base`, and recycle.
+
+> The host itself is still on `nixos-25.05` (also end-of-support). Upgrading the host OS is
+> a separate, larger change out of scope of the CI-runner platform and is tracked separately.
+
+## Runner update model
+
+`--disableupdate` is an **intentional architecture decision**, not a limitation:
+
+- The runner executable lives in the immutable `/nix/store`. GitHub's in-place self-update
+  (download + `tar -xzf` over its own directory) cannot mutate that installation and would
+  crash-loop the listener. So self-update is disabled and **Nix / the guest image is the
+  sole update authority**.
+- GitHub still requires self-hosted runners to stay current
+  ([docs](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/autoscaling-with-self-hosted-runners#controlling-runner-software-updates-on-self-hosted-runners)):
+  - **Registration minimum:** a runner must be **≥ 2.329.0** to (re)register.
+  - **30-day window:** once a newer release is published you must update within **30 days**,
+    or GitHub stops queuing jobs to the runner.
+  - **Critical security updates** can pause job queuing immediately, regardless of the window.
+- Even current NixOS **stable** lags (26.05 ships 2.335.1 vs latest 2.336.0), so the runner
+  is pinned from `nixpkgs-unstable` to stay inside the window without moving the whole guest
+  OS off stable.
+
+Image-managed update mechanism:
+
+```text
+bump pinned runner (nix flake update nixpkgs-unstable)
+  → rebuild base qcow2
+  → validate candidate (dummy isolation + generic Node CI)
+  → install candidate atomically (install-base)
+  → recycle clean spare
+```
+
+Freshness is **monitored** (see [Runner freshness](#runner-freshness-monitoring)) so the
+30-day deadline is observable rather than relying on memory. Monitoring never edits
+`flake.lock`; the Git repository stays authoritative over inputs.
+
+## Node / generic Linux-binary compatibility
+
+Consuming repositories own their **application toolchain versions**; the guest owns only the
+generic ability to run conventional, dynamically linked Linux binaries that GitHub Actions
+downloads at job time.
+
+- `programs.nix-ld.enable = true` in the guest installs a shim at
+  `/lib64/ld-linux-x86-64.so.2` (which NixOS otherwise lacks) so downloaded binaries — e.g.
+  the Node runtime fetched by `actions/setup-node`, and prebuilt native npm packages — can
+  execute. The runner service also exports `NIX_LD` / `NIX_LD_LIBRARY_PATH` (nix-ld's
+  `sessionVariables` do not reach systemd services), which propagate to job steps.
+- The nix-ld library set is the module default (zlib, zstd, `stdenv.cc.cc`/libstdc++,
+  openssl, …) — the minimum generic set, deliberately **not** expanded until an actual
+  validation failure demonstrates a specific missing library.
+- The runner service PATH includes the standard archive/text utilities (`tar`, `gzip`, `xz`,
+  `unzip`, `grep`, `sed`, `awk`, `find`) that the runner uses to unpack actions and that
+  ordinary `run:` steps expect. These are generic tools, not application toolchains.
+
+No particular Node version, package-manager version, or build command is baked into the
+image. See the [validation report](ci-runner-validation.md) for the real disposable Node CI
+proof (setup-node → Node 24, npm, Corepack/pnpm, and a prebuilt native tool via nix-ld).
+
+## Support boundary
+
+- GitHub officially lists Ubuntu and several other Linux distributions for self-hosted
+  runners. **NixOS is not on GitHub's published supported-OS list.**
+- NixOS is intentionally retained here because the guest image is **declaratively built and
+  disposable**, and this is backed by a successful real Node CI validation on the disposable
+  guest (setup-node, npm, Corepack, and a prebuilt native binary all run via nix-ld).
+- Ubuntu remains a **fallback, not the current target**. Reconsider it only on evidence of
+  *systemic* incompatibility (standard Actions repeatedly failing due to NixOS, many
+  downloaded binaries needing ad-hoc fixes, growing image-specific hacks). A one-off need for
+  nix-ld or an extra generic tool on PATH is **not** such a reason. This does not imply
+  official GitHub support for NixOS.
+
+## Runner freshness monitoring
+
+`ci-runner-freshness.timer` (every 12h) runs `ci-runnerctl freshness`, which compares the
+baked runner version against the latest published GitHub Actions runner release via the
+public, unauthenticated releases API (no GitHub credentials). It is **observe-only** — it
+never mutates `flake.lock`, rebuilds, or deploys:
+
+```text
+monitor detects runner behind latest release
+  → metric / warning
+  → human updates committed flake.lock
+  → candidate image rebuilt + validated
+  → new base deployed
+```
+
+Textfile metrics (`/var/lib/node_exporter_textfile/ci_runner_freshness.prom`):
+
+- `ci_runner_baked_version_info{version=…}` — baked runner version
+- `ci_runner_latest_version_info{version=…}` — latest published release
+- `ci_runner_update_available` — 1 if baked is behind latest
+- `ci_runner_latest_release_timestamp` — publish time of latest release
+- `ci_runner_update_deadline_timestamp` — latest release + 30d (0 when up to date/unknown)
+- `ci_runner_freshness_check_timestamp` / `ci_runner_freshness_check_success`
 
 ## Build / install base image
 
@@ -195,26 +295,46 @@ nix build /home/toka/nixosconfig#ci-runner-guest-image -L
 sudo ci-runnerctl install-base result/ci-runner-base.qcow2
 ```
 
-Safe update flow:
+### Maintenance lifecycle
 
-1. Build a new base image
-2. `ci-runnerctl install-base` (atomic symlink `base/current.qcow2`)
-3. `sudo ci-runnerctl destroy-all` (or let reaper clear idle spare)
-4. `sudo ci-runnerctl reconcile` to provision a replacement
-5. Prune old files under `/data/ci/base/` when no overlays reference them
+Human-controlled source changes (Git stays authoritative over flake inputs):
+
+1. Update a flake input in `flake.nix`/`flake.lock` and **commit** it:
+   - `nixpkgs-unstable` → newer `github-runner` (freshness monitor flags this), or
+   - `nixpkgs-guest` → newer supported stable NixOS.
+2. Build a candidate base image: `nix build .#ci-runner-guest-image -L`.
+3. Validate the candidate **without replacing the live base** (boot under a non
+   `ci-ephemeral-*` name so the reaper/reconciler ignore it):
+   - dummy isolation proof, then
+   - a real disposable Node CI run on a **throwaway** repo where appropriate.
+
+Operational install/recycle (once the candidate passes):
+
+4. `sudo ci-runnerctl install-base <candidate.qcow2>` — atomic `base/current.qcow2` swap.
+5. `sudo ci-runnerctl destroy-all` (or let the reaper clear the idle spare).
+6. `sudo ci-runnerctl reconcile` — provision a fresh spare from the new base.
+7. Verify the new runner registers and is `Listening for Jobs`.
+8. Keep the previous base under `/data/ci/base/` for rollback; prune older unreferenced
+   bases later once no overlays reference them.
+
+> Changing the provisioner package (`ci-runnerctl`) alters the `ci-runner-reaper.service`
+> `ExecStart`, so a `nixos-rebuild switch` will re-run the fail-closed boot reaper once and
+> recycle the idle spare. This self-heals (reconcile provisions a fresh spare) and is
+> expected during upgrades of the platform code itself.
 
 ## Operations
 
 ```bash
 sudo ci-runnerctl status
 sudo ci-runnerctl metrics
+sudo ci-runnerctl freshness      # compare baked runner vs latest GitHub release (observe-only)
 sudo ci-runnerctl github-check   # validate App creds/permissions (registers nothing)
 sudo ci-runnerctl reap
 sudo ci-runnerctl reconcile
 sudo ci-runnerctl provision      # provision one ephemeral runner guest (GitHub enabled)
 sudo ci-runnerctl dummy          # isolation proof without GitHub
 sudo ci-runnerctl destroy-all    # safe: prefix-filtered only
-journalctl -u ci-runner-provisioner -u ci-runner-reaper -t ci-runnerctl -f
+journalctl -u ci-runner-provisioner -u ci-runner-reaper -u ci-runner-freshness -t ci-runnerctl -f
 virsh list --all
 virsh net-info ci-net
 ```
@@ -230,6 +350,9 @@ Written to `/var/lib/node_exporter_textfile/ci_runner.prom`:
 - `ci_runner_teardown_failures_total`
 - `ci_runner_orphan_cleanup_total`
 - `ci_runner_overlay_bytes`
+
+Runner-freshness metrics are written separately to `ci_runner_freshness.prom` (see
+[Runner freshness monitoring](#runner-freshness-monitoring)).
 
 ### Host reboot
 

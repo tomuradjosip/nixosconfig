@@ -255,7 +255,7 @@ MemAvailable / vCPU headroom (prefer right-sizing guest RAM first).
 |------|--------|
 | Module | `packages/ci-runner-pool.py` |
 | Tests | `tests/ci_runner_pool_test.py` |
-| Count | **25** tests |
+| Count | **31** tests (includes live `maxGuests=3` ceiling cases) |
 | Run | `python3 tests/ci_runner_pool_test.py` → all OK |
 
 Coverage includes: idle deficit / `maxGuests` arithmetic, provisioning counts toward idle
@@ -296,26 +296,142 @@ production spare undisturbed: ci-ephemeral-20260809180325-12126
 candidate serial: /data/ci/logs/ci-candidate-20260809180358-13205.serial.log
 ```
 
-### Pool scale / drain (live)
+### Pool scale / drain (synthetic, pre-E2E)
 
-Live config after deploy: `desiredIdleCapacity=1`, `maxGuests=3`. Production App remains
-scoped only to the existing registration repo (cannot add the validation harness via API —
-HTTP 403). Pool busy→replacement against that App-scoped repo was **not** exercised with a
-real application workflow (intentionally avoided). Instead:
+Before the real-job elastic-pool run below, forced-provision / fail-closed checks were
+recorded (still valid):
 
 | Scenario | Result |
 |----------|--------|
-| Initial idle | `idle=1 total=1` after reconcile |
 | Forced multi-guest up to cap | `ci-runnerctl provision` ×2 → `total=3`; fourth attempt logs `max guests reached` |
-| Three online idle | Observed `idle=3 provisioning=0 total=3` (forced; normal policy keeps 1 idle) |
-| Concurrent reconcile | Two simultaneous `reconcile` under `flock` → both exit 0; still `total=1` when already satisfied |
-| GitHub API failure | Pem temporarily moved → `fail-closed`, `github_ok=false`, `provision=0`, all 3 running guests retained |
-| Drain back to one | Destroyed two extras → `idle=1 total=1` |
-| Busy→provision arithmetic (live domain + planner) | Snapshot of running spare with synthetic GitHub `busy=true` → `provision=1` via `ci-runner-pool plan` |
-| Overlay generation pin | Guest backing store = `/data/ci/base/ci-runner-base-….qcow2` (immutable path, not `current` symlink) |
+| Concurrent reconcile | Two simultaneous `reconcile` under `flock` → both exit 0 |
+| GitHub API failure | Pem temporarily moved → `fail-closed`, `github_ok=false`, `provision=0` |
+| Busy→provision arithmetic | Synthetic GitHub `busy=true` → `provision=1` via `ci-runner-pool plan` |
 | Candidate exclusion | `ci-candidate-*` never counted in production pool during validate-candidate |
 
-**Final steady state after validation:**
+## Elastic pool end-to-end validation
+
+**Date/time:** 2026-08-09 ~16:42–16:48 UTC (host CEST 18:42–18:48)  
+**Validation repository:** [`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation)  
+**Workflow / run:** `pool-concurrency.yml` / [run 31324469650](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31324469650)  
+**Harness commit:** `a403109` (after fixing a missing `hostname(1)` abort under `set -e`)  
+**Live config during test:** `desiredIdleCapacity=1`, `maxGuests=3`, temporary
+`secrets.ciRunner.githubRepo = "nixos-ci-runner-validation"` (consuming app repo not used).  
+**Base ID:** `75978281162b0394` (`ci-runner-base-20260809170658.qcow2`)
+
+The GitHub App installation remains shopforge-only (UI/API cannot expand it from this host).
+For the harness window the provisioner used **App-first, `gh`/`runuser` fallback** for
+runner list + registration-token so systemd reconcile could observe the validation repo.
+
+### State A — initial steady
+
+```
+busy=0 idle=1 total=1 saturated=false github_ok=true
+runner/domain: ci-ephemeral-20260809184124-32315
+overlay: /data/ci/overlays/ci-ephemeral-20260809184124-32315.qcow2
+```
+
+Metrics: `ci_runner_idle=1 busy=0 total=1 max_guests=3 desired_idle=1 saturated=0 github_ok=1`.
+
+### First busy → replacement (toward B)
+
+| Time (CEST) | Observation |
+|-------------|-------------|
+| 18:42:14 | Job `pool (2)` assigned to `…84124-32315` |
+| 18:42:33 | `busy=1 idle=0 total=2 provisioning=1` — idle deficit observed; fresh guest `…84226-31818` booting |
+| 18:42:56 | Job `pool (3)` on `…84226-31818`; third guest `…84256-3944` provisioning |
+
+Exact `busy=1 idle=1 total=2` was transient (second job claimed the new idle immediately);
+the deficit→provision transition is proven by `total=2 provisioning=1` with distinct overlays.
+
+### State C — two busy + one idle
+
+```
+18:43:21  busy=2 idle=1 total=3
+  ci-ephemeral-20260809184124-32315  busy
+  ci-ephemeral-20260809184226-31818  busy
+  ci-ephemeral-20260809184256-3944   idle
+```
+
+Three domains, three overlays; no fourth guest.
+
+### State D — saturation (critical)
+
+```
+18:43:36  busy=3 idle=0 total=3 saturated=true
+pool.json: provision=0 saturated=true total=3
+```
+
+Job `pool (1)` on `…84256-3944`. After **+35s** further reconcile: still
+`busy=3 idle=0 total=3 saturated=1`, **exactly 3** `ci-ephemeral-*` domains/overlays,
+`provision=0`. **No fourth runner/guest created.**
+
+Metrics at D / D+35s: `idle=0 busy=3 total=3 max_guests=3 saturated=1 github_ok=1`.
+
+### Concurrent job identities + isolation
+
+| Job | Runner / domain | Overlay | Isolation |
+|-----|-----------------|---------|-----------|
+| pool (2) | `ci-ephemeral-20260809184124-32315` | own COW | `other_slot_markers=0` → `POOL_JOB_ISOLATION_OK` |
+| pool (3) | `ci-ephemeral-20260809184226-31818` | own COW | `other_slot_markers=0` → `POOL_JOB_ISOLATION_OK` |
+| pool (1) | `ci-ephemeral-20260809184256-3944` | own COW | `other_slot_markers=0` → `POOL_JOB_ISOLATION_OK` |
+
+All three jobs succeeded (~180s sleep each). No guest was reused for a second job.
+
+### Completion / destruction (each busy guest)
+
+Serial logs (retained under `/data/ci/logs/`) for all three:
+
+```
+Running job: pool (…)
+Job pool (…) completed with result: Succeeded
+√ Removed .credentials
+√ Removed .runner
+runner exited rc=0
+requesting poweroff → reboot: Power down
+```
+
+Then provisioner/reaper removed domain + seed + overlay. Completed guests did **not**
+return as idle spares.
+
+### State E — drain
+
+```
+18:48:35  busy=0 idle=1 total=1 saturated=false
+fresh warm spare: ci-ephemeral-20260809184809-305  (not one of the three job guests)
+overlay/seed: only that spare remains
+GitHub runners: only that spare online
+```
+
+Metrics: `idle=1 busy=0 total=1 saturated=0 github_ok=1`.  
+`max_total_seen=3`, `fourth_guest_seen=false` over the full timeline.
+
+### Candidate-validation regression (same session)
+
+```
+sudo ci-runnerctl validate-candidate /data/ci/base/current.qcow2
+→ PASS: candidate dummy validation
+production spare undisturbed: ci-ephemeral-20260809184809-305
+candidate: ci-candidate-20260809184913-9719 (cleaned; serial retained)
+```
+
+### Unit tests
+
+`python3 tests/ci_runner_pool_test.py` → **31** tests OK (includes live `maxGuests=3`
+ceiling cases: 0/1/2/3 busy transitions and saturation).
+
+### Bugs found and fixed during this acceptance pass
+
+1. **Harness job abort:** `hostname(1)` missing on guest PATH under `set -e` → fixed in
+   `pool-concurrency.yml` (`a403109`); use `RUNNER_NAME` / `/etc/hostname`.
+2. **Systemd GitHub harness access:** App cannot see the validation repo; interactive
+   `sudo -u … gh` failed under the provisioner unit (no `sudo` on PATH) →
+   App-first + `runuser`/`gh` fallback for list/register/stale-delete.
+3. **Rebuild destroyed warm spare:** package path change restarted
+   `ci-runner-reaper.service` and re-ran `reap-boot` → set
+   `restartIfChanged = false` / `stopIfChanged = false` on that unit.
+
+### Final live health (end of E2E, before restoring consuming-app repo target)
 
 ```
 capacity:
@@ -327,22 +443,13 @@ capacity:
   provisioning: 0
   saturated:    false
   github_ok:    true
+guest: ci-ephemeral-20260809184809-305
 ```
-
-Metrics include `ci_runner_idle`, `ci_runner_busy`, `ci_runner_provisioning`,
-`ci_runner_total`, `ci_runner_max_guests`, `ci_runner_desired_idle`, `ci_runner_saturated`,
-`ci_runner_github_ok` (plus legacy `ci_runner_clean_capacity` alias).
-
-> **Deviation / follow-up:** end-to-end busy→replacement with overlapping real jobs on the
-> App-scoped repo was skipped to avoid consuming-application CI. To exercise it later either
-> (a) add the validation harness repo to the GitHub App installation in the UI and temporarily
-> point `secrets.ciRunner.githubRepo` at it, or (b) dispatch a disposable workflow on the
-> App-scoped repo. Unit tests + the live `busy=true` → `provision=1` planner proof cover the
-> decision logic.
 
 ### Out of scope (unchanged / explicit)
 
 - No workflow_job webhooks, ARC, Kubernetes, or queue-depth scaling
 - Gradual burst ramp-up only (30s poll)
-- Host remains `nixos-25.05`
+- Host NixOS version remains out of scope for this acceptance (`nixos-25.05`)
 - Live `maxGuests=10` at 4 GiB/guest is **not** safe on this host
+- GitHub App installation was **not** expanded to the harness (fallback used instead)

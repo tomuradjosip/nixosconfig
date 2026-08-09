@@ -52,7 +52,7 @@ Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the gu
 | `packages/ci-runner-guest-image.nix` | qcow2 image build (guest = `nixpkgs-guest`) |
 | `packages/ci-runner-provisioner.nix` | `ci-runnerctl` |
 | `packages/ci-runner-pool.py` | Deterministic pool planner (pure; unit-tested) |
-| `tests/ci_runner_pool_test.py` | Planner unit tests (25 cases) |
+| `tests/ci_runner_pool_test.py` | Planner unit tests (31 cases) |
 
 **systemd:**
 
@@ -398,10 +398,10 @@ Operational install/recycle (once the candidate passes):
 7. Keep the previous base under `/data/ci/base/` for rollback; prune older unreferenced
    bases later once no overlays reference them.
 
-> Changing the provisioner package (`ci-runnerctl`) alters the `ci-runner-reaper.service`
-> `ExecStart`, so a `nixos-rebuild switch` will re-run the fail-closed boot reaper once and
-> recycle production guests. This self-heals (reconcile restores idle capacity) and is
-> expected during upgrades of the platform code itself.
+> `ci-runner-reaper.service` is configured with `restartIfChanged = false` /
+> `stopIfChanged = false` so a `nixos-rebuild switch` that only changes the provisioner
+> package path does **not** re-run fail-closed `reap-boot` and destroy the warm spare.
+> Real boots still run `reap-boot` once via `wantedBy = multi-user.target`.
 
 ## Validating a candidate image
 
@@ -416,24 +416,42 @@ sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/
 | Default (no `--github-repo`) | Dummy isolation: HTTPS/DNS/LAN/SSH probes, `ci-candidate-*` domain, trap cleanup, retain serial log. Never touches production spare, `install-base`, or `current.qcow2`. |
 | `--github-repo OWNER/REPO` | Explicit GitHub validation. Registration token from `CI_RUNNER_REG_TOKEN` or `gh api` — **not** the production GitHub App (keeps validation harness auth separate). Waits for guest poweroff up to `--timeout` (default 240s). |
 
-**Node compatibility regression harness.**
+**Infrastructure regression harness (keep small / non-application).**
 [`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation)
-holds `node-validation.yml` (`runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]`) exercising
-setup-node → Node 24 → npm → prebuilt native (esbuild) → Corepack/pnpm. It is **not** the
-live application repo; re-run against a candidate with:
+is the retained harness (not a consuming app repo):
+
+| Workflow | Purpose |
+|----------|---------|
+| `node-validation.yml` | Single-runner Node / nix-ld compatibility |
+| `pool-concurrency.yml` | Elastic pool: 3 overlapping lightweight jobs → scale / saturate / drain |
+
+Candidate Node check:
 
 ```bash
 REPO=tomuradjosip/nixos-ci-runner-validation
-# Terminal A — start candidate (uses gh or CI_RUNNER_REG_TOKEN; not the App):
 sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
   --github-repo "$REPO" --timeout 600
-# Terminal B — once serial shows Listening for Jobs:
+# once serial shows Listening for Jobs:
 gh workflow run node-validation.yml -R "$REPO" --ref main
 gh run watch -R "$REPO"
 ```
 
+Elastic pool concurrency (temporarily point `secrets.ciRunner.githubRepo` at the harness,
+`nixos-rebuild switch --impure`, `recycle-idle`; restore the consuming-app repo afterward).
+If the GitHub App installation does not include the harness repo, the provisioner falls
+back to host `gh` via `runuser` for list/register (App remains preferred when installed):
+
+```bash
+REPO=tomuradjosip/nixos-ci-runner-validation
+sudo ci-runnerctl status   # expect idle=1 total=1 max=3
+gh workflow run pool-concurrency.yml -R "$REPO" --ref main
+# observe: busy/idle/total → saturate at 3 → drain back to idle=1
+```
+
 `validate-candidate` cleans up the `ci-candidate-*` guest on exit and prints whether the
 production domain set was undisturbed. Serial log is retained under `/data/ci/logs/`.
+See the [validation report](ci-runner-validation.md#elastic-pool-end-to-end-validation) for
+the accepted live evidence.
 
 ## Operations
 

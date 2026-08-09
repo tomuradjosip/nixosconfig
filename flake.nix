@@ -7,10 +7,11 @@
     # disposable guest tracks a supported stable release (26.05 "Yarara") independently
     # of the host's upgrade cadence. 25.05 "Warbler" reached end-of-support 2025-12-31.
     nixpkgs-guest.url = "github:nixos/nixpkgs/nixos-26.05";
-    # Used ONLY for the CI guest image's github-runner: GitHub deprecates old runner
-    # versions (a self-hosted runner must be within 30 days of the latest release), and
-    # even current stable lags (26.05 ships 2.335.1 vs latest 2.336.0). unstable provides
-    # a sufficiently current runner without moving the whole guest OS off stable.
+    # Used ONLY for narrow CI guest pins that stable lacks:
+    #   - github-runner: GitHub deprecates old runner versions (must be within 30 days of
+    #     latest); even current stable lags (26.05 ships 2.335.1 vs latest 2.336.0).
+    #   - podman-compose: 26.05 ships 1.5.0 (no `up --wait`); unstable has 1.6.0.
+    # Do not move the whole guest OS onto unstable.
     nixpkgs-unstable.url = "github:nixos/nixpkgs/nixos-unstable";
     impermanence.url = "github:nix-community/impermanence";
     aliases = {
@@ -37,6 +38,8 @@
       unstablePkgs = import nixpkgs-unstable { inherit system; };
       # Single source of truth for the github-runner pinned into the guest image.
       runnerPkg = unstablePkgs.github-runner;
+      # Compose provider for `podman compose` inside disposable guests (1.6.0+ for --wait).
+      podmanComposePkg = unstablePkgs.podman-compose;
     in
     {
       nixosConfigurations.${secrets.hostname} = nixpkgs.lib.nixosSystem {
@@ -54,9 +57,11 @@
       };
 
       packages.${system} = {
-        # Built from the guest (stable 26.05) package set; only the runner comes from unstable.
+        # Built from the guest (stable 26.05) package set; github-runner and
+        # podman-compose are the only unstable injections.
         ci-runner-guest-image = guestPkgs.callPackage ./packages/ci-runner-guest-image.nix {
           githubRunner = runnerPkg;
+          podmanCompose = podmanComposePkg;
         };
         ci-runner-provisioner = pkgs.callPackage ./packages/ci-runner-provisioner.nix {
           runnerVersion = runnerPkg.version;

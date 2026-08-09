@@ -244,17 +244,72 @@ in
 
   # Generic ability to execute conventional, dynamically linked Linux binaries that
   # GitHub Actions tooling downloads at job time (e.g. the Node runtime fetched by
-  # actions/setup-node, and prebuilt native npm packages). Precompiled binaries expect
-  # /lib64/ld-linux-x86-64.so.2, which does not exist on NixOS; nix-ld installs a shim
-  # there and supplies a generic library search path. NixOS owns this compatibility
-  # layer; consuming repositories remain authoritative for their toolchain *versions*.
-  # The default library set (zlib, zstd, stdenv.cc.cc/libstdc++, openssl, ...) is the
-  # minimum general-purpose set — deliberately not expanded until a real validation
-  # failure demonstrates a specific missing library.
+  # actions/setup-node, prebuilt native npm packages, and Playwright-managed Chromium).
+  # Precompiled binaries expect /lib64/ld-linux-x86-64.so.2, which does not exist on
+  # NixOS; nix-ld installs a shim there and supplies a generic library search path.
+  # NixOS owns this compatibility layer; consuming repositories remain authoritative
+  # for their toolchain *versions* (Node, pnpm, @playwright/test, Chromium revision).
   programs.nix-ld.enable = true;
+  # Chromium runtime libs for Playwright-downloaded browsers (`playwright install
+  # chromium`, not `--with-deps`). Mapped from Playwright's Chromium nativeDeps
+  # (ALSA/ATK/AT-SPI/Cairo/CUPS/DBus/DRM/GBM/GLib/NSPR/NSS/Pango/X11/XCB/xkbcommon
+  # /Fontconfig/Freetype + basic fonts). Not Firefox/WebKit-specific packages.
+  programs.nix-ld.libraries = with pkgs; [
+    alsa-lib
+    at-spi2-core # provides ATK / at-spi2-atk on NixOS 26.05+
+    cairo
+    cups
+    dbus
+    expat
+    fontconfig
+    freetype
+    glib
+    gtk3
+    libdrm
+    libgbm
+    libGL
+    libx11
+    libxcomposite
+    libxdamage
+    libxext
+    libxfixes
+    libxkbcommon
+    libxrandr
+    libxcb
+    libxshmfence
+    mesa
+    nspr
+    nss
+    pango
+  ];
 
+  # Basic fonts so headless Chromium can render text without a desktop environment.
+  fonts.packages = with pkgs; [
+    dejavu_fonts
+    liberation_ttf
+  ];
+  fonts.fontconfig.enable = true;
+
+  # Docker Engine is intentionally absent. Rootful Podman is guest-local only:
+  # no host socket, no Docker socket compat, no privileged containers by default.
+  # Runner job code already executes as root in this disposable VM (Option A).
   virtualisation.docker.enable = lib.mkForce false;
-  virtualisation.podman.enable = lib.mkForce false;
+  virtualisation.podman = {
+    enable = true;
+    dockerCompat = false;
+    dockerSocket.enable = false;
+    # Container-to-container DNS inside the guest (postgres/redis compose stacks).
+    defaultNetwork.settings.dns_enabled = true;
+    # Keep compose on the wrapped podman PATH; provider pin is via containers.conf
+    # + PODMAN_COMPOSE_PROVIDER (not ambiguous docker-compose discovery).
+    extraPackages = [ pkgs.podman-compose ];
+  };
+  # Deterministic Compose provider: unstable-pinned podman-compose 1.6.0+ for
+  # `podman compose up -d --wait` (guest stable only ships 1.5.0).
+  virtualisation.containers.containersConf.settings.engine = {
+    compose_providers = [ "${pkgs.podman-compose}/bin/podman-compose" ];
+  };
+
   services.openssh.enable = false;
 
   services.journald.extraConfig = ''
@@ -273,10 +328,13 @@ in
     # programs.nix-ld only exports NIX_LD via environment.sessionVariables, which is not
     # applied to systemd services. Set it explicitly here so the runner process — and the
     # GitHub Actions job steps it spawns — can execute downloaded dynamically linked
-    # binaries (e.g. the Node runtime from actions/setup-node) via the nix-ld shim.
+    # binaries (e.g. the Node runtime from actions/setup-node, Playwright Chromium)
+    # via the nix-ld shim. PODMAN_COMPOSE_PROVIDER pins Compose independently of PATH
+    # discovery (docker-compose must not win by accident).
     environment = {
       NIX_LD = "/run/current-system/sw/share/nix-ld/lib/ld.so";
       NIX_LD_LIBRARY_PATH = "/run/current-system/sw/share/nix-ld/lib";
+      PODMAN_COMPOSE_PROVIDER = "${pkgs.podman-compose}/bin/podman-compose";
     };
     serviceConfig = {
       Type = "oneshot";
@@ -289,6 +347,7 @@ in
     # downloaded actions with `tar`/`gzip` (checkout, setup-node, ...), and ordinary shell
     # `run:` steps expect the standard text/archive utilities. These are generic tools,
     # not application toolchains (which repositories install themselves via setup-node etc.).
+    # podman / podman-compose are guest platform tools for disposable test services.
     path = with pkgs; [
       coreutils
       bash
@@ -308,6 +367,9 @@ in
       gnused
       gawk
       findutils
+      config.virtualisation.podman.package
+      podman-compose
+      procps # free/ps for guest resource measurements in CI jobs
     ];
     serviceConfig.ExecStart = "${lifecycleScript}";
   };

@@ -1,0 +1,51 @@
+# Platform smoke for nixos-ephemeral-ci candidate validation (workflow_dispatch only).
+name: e2e-platform-smoke
+on:
+  workflow_dispatch:
+jobs:
+  platform:
+    runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Resource baseline
+        run: |
+          set -euo pipefail
+          echo "== free =="; free -m || true
+          echo "== df =="; df -h / /tmp || true
+          echo "== nproc =="; nproc || true
+          echo "== memory.peak ==";
+          cg="$(awk -F: 'NR==1{print $3}' /proc/self/cgroup 2>/dev/null || true)"
+          if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/memory.peak" ]]; then
+            cat "/sys/fs/cgroup${cg}/memory.peak"
+          else
+            echo unavailable
+          fi
+      - name: Podman success-path smoke
+        run: bash fixtures/ci-runner-e2e/podman-smoke.sh
+      - name: Podman failure-path Compose cleanup
+        run: bash fixtures/ci-runner-e2e/podman-failure-cleanup-smoke.sh
+      - name: Playwright Chromium smoke
+        env:
+          DEBUG: pw:browser
+          PLAYWRIGHT_VERSION: "1.62.1"
+        run: bash fixtures/ci-runner-e2e/playwright-smoke.sh
+      - name: Combined Podman + Playwright smoke
+        env:
+          DEBUG: pw:browser
+          PLAYWRIGHT_VERSION: "1.62.1"
+        run: bash fixtures/ci-runner-e2e/combined-smoke.sh
+      - name: Resource after
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "== free =="; free -m || true
+          echo "== df =="; df -h / /tmp || true
+          echo "== playwright cache =="; du -sh "${HOME}/.cache/ms-playwright" 2>/dev/null || true
+          echo "== podman system df =="; podman system df 2>/dev/null || true
+          cg="$(awk -F: 'NR==1{print $3}' /proc/self/cgroup 2>/dev/null || true)"
+          if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/memory.peak" ]]; then
+            echo "== memory.peak =="; cat "/sys/fs/cgroup${cg}/memory.peak"
+          fi

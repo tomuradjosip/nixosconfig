@@ -32,7 +32,9 @@ reconciler restores desiredIdleCapacity idle guests (subject to maxGuests)
 | Guest | Short-lived registration token (seed ISO only) | App private key, host mounts/sockets, LAN |
 | After teardown | Host journal + metrics | Overlay, seed, runner state |
 
-Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the guest (v1).
+Guests do **not** attach to `br0`. Docker Engine is **not** installed. **Rootful Podman**
+is available **inside disposable guests only** (guest-local storage/networking; no host
+Docker/Podman socket; no Docker socket compatibility alias).
 
 ## Network policy
 
@@ -88,6 +90,8 @@ services.ciRunner = {
 | `packages/ci-runner-pool.py` | Deterministic pool planner (pure; unit-tested) |
 | `tests/ci_runner_pool_test.py` | Planner unit tests (31 cases) |
 | `tests/ci_runner_network_test.py` | Network render unit tests (DNS + INPUT/FORWARD) |
+| `tests/ci_runner_guest_test.py` | Guest capability invariants (Podman/Compose/nix-ld/SSH) |
+| `fixtures/ci-runner-e2e/` | Podman + Playwright smoke fixtures for candidate validation (incl. failure-path Compose cleanup proof) |
 
 **systemd:**
 
@@ -294,12 +298,14 @@ This repository does not own application workflow YAML.
 |-----------|-------------|---------|
 | Host (provisioner/control plane) | `nixpkgs` | `nixos-25.05` |
 | **Disposable guest** | `nixpkgs-guest` | **`nixos-26.05`** (current supported stable) |
-| `github-runner` only | `nixpkgs-unstable` | current runner |
+| `github-runner` | `nixpkgs-unstable` | current runner |
+| `podman-compose` | `nixpkgs-unstable` | **1.6.0** (`up --wait`) |
 
 The guest OS is a dedicated flake input (`nixpkgs-guest`) so the disposable image can track
 a **supported stable** NixOS release independently of the host's upgrade cadence. 25.05
 "Warbler" reached end-of-support 2025-12-31; the guest now runs 26.05 "Yarara" (supported
-through 2026-12-31). Only `github-runner` is sourced from unstable (see below).
+through 2026-12-31). Only narrow pins (`github-runner`, `podman-compose`) come from
+unstable — the guest OS itself stays on stable.
 
 To move the guest to a newer stable: bump `nixpkgs-guest` in `flake.nix`/`flake.lock`,
 rebuild the guest image, validate, `install-base`, and `recycle-idle`.
@@ -347,19 +353,101 @@ downloads at job time.
 
 - `programs.nix-ld.enable = true` in the guest installs a shim at
   `/lib64/ld-linux-x86-64.so.2` (which NixOS otherwise lacks) so downloaded binaries — e.g.
-  the Node runtime fetched by `actions/setup-node`, and prebuilt native npm packages — can
-  execute. The runner service also exports `NIX_LD` / `NIX_LD_LIBRARY_PATH` (nix-ld's
-  `sessionVariables` do not reach systemd services), which propagate to job steps.
+  the Node runtime fetched by `actions/setup-node`, prebuilt native npm packages, and
+  Playwright-managed Chromium — can execute. The runner service also exports `NIX_LD` /
+  `NIX_LD_LIBRARY_PATH` (nix-ld's `sessionVariables` do not reach systemd services), which
+  propagate to job steps.
 - The nix-ld library set is the module default (zlib, zstd, `stdenv.cc.cc`/libstdc++,
-  openssl, …) — the minimum generic set, deliberately **not** expanded until an actual
-  validation failure demonstrates a specific missing library.
+  openssl, …) **plus** Chromium runtime libraries required for Playwright-downloaded
+  browsers (see [Playwright Chromium](#playwright-chromium-support)).
 - The runner service PATH includes the standard archive/text utilities (`tar`, `gzip`, `xz`,
   `unzip`, `grep`, `sed`, `awk`, `find`) that the runner uses to unpack actions and that
-  ordinary `run:` steps expect. These are generic tools, not application toolchains.
+  ordinary `run:` steps expect, plus guest Podman / `podman-compose`. These are generic
+  platform tools, not application toolchains.
 
-No particular Node version, package-manager version, or build command is baked into the
-image. See the [validation report](ci-runner-validation.md) for the real disposable Node CI
-proof (setup-node → Node 24, npm, Corepack/pnpm, and a prebuilt native tool via nix-ld).
+No particular Node version, package-manager version, Medusa version, Playwright npm version,
+or browser revision is baked into the image. See the [validation report](ci-runner-validation.md)
+for the real disposable Node CI proof (setup-node → Node 24, npm, Corepack/pnpm, and a
+prebuilt native tool via nix-ld).
+
+## Podman inside disposable guests
+
+Rootful **Podman** (not Docker Engine) is enabled **only inside the disposable guest**:
+
+| Property | Value |
+|----------|-------|
+| Engine | Podman (rootful) |
+| Why rootful | Job code already runs as root in the throwaway VM (accepted Option A) |
+| Storage / networks | Guest-local only; destroyed with the overlay |
+| Host sockets | **None** — no host Podman/Docker/libvirt socket passthrough |
+| Docker Engine | Disabled (`virtualisation.docker.enable = false`) |
+| Docker CLI alias | Disabled (`dockerCompat = false`) |
+| `/var/run/docker.sock` compat | Disabled (`dockerSocket.enable = false`) |
+| Privileged containers | Not required / not granted by the platform |
+| LAN firewall | Unchanged — Postgres/Redis bind guest loopback |
+
+Compose provider is pinned to **`podman-compose` 1.6.0** from `nixpkgs-unstable` because
+guest stable (`nixos-26.05`) only has 1.5.0, which cannot run:
+
+```bash
+podman compose up -d --wait
+```
+
+Determinism: `containers.conf` `engine.compose_providers` and the runner service
+`PODMAN_COMPOSE_PROVIDER` both point at the unstable-pinned binary so discovery cannot
+prefer a stray `docker-compose`.
+
+Supported smoke:
+
+```bash
+podman info
+podman compose version
+podman compose -p ci-runner-e2e -f compose.yaml up -d --wait   # healthchecked postgres+redis on 127.0.0.1
+podman compose -p ci-runner-e2e -f compose.yaml down -v          # removes project containers + named volumes
+```
+
+Fixtures (`fixtures/ci-runner-e2e/`) use project-local named volumes (`pgdata`, `redisdata`)
+and assert those volumes are gone after `down -v`. Smoke scripts install EXIT traps that
+attempt project-scoped `down -v` whenever the explicit volume-removal proof has not
+completed — including when `up -d --wait` itself fails after partially creating resources.
+Cleanup errors are ignored so they never mask the original failure. See
+`podman-failure-cleanup-smoke.sh` for the controlled failure-path proof.
+
+## Playwright Chromium support
+
+Contract:
+
+| Owner | Responsibility |
+|-------|----------------|
+| Consuming repository | `@playwright/test` version, Chromium revision, test config |
+| Runner guest | OS runtime libraries via `programs.nix-ld.libraries` + basic fonts |
+
+Supported model:
+
+```text
+Shopforge @playwright/test
+  → playwright install chromium          # NOT --with-deps
+  → Playwright-managed Chromium binary
+  → nix-ld + guest shared libraries
+```
+
+The platform smoke fixture defaults to an explicit current stable pin
+(`PLAYWRIGHT_VERSION=1.62.1` as of the 2026-08-10 correction pass; overridable) and runs
+`npx playwright install chromium` without `--with-deps`. Consuming apps may choose their
+own `@playwright/test` version; the guest only supplies the Chromium runtime library set.
+
+Do **not** use `playwright install --with-deps` as the NixOS dependency mechanism. Do **not**
+treat NixOS `chromium` as the primary browser executable unless the Playwright-managed path
+proves unworkable.
+
+Chromium runtime libraries added for headless launch (Playwright Chromium nativeDeps families):
+ALSA, ATK, AT-SPI, Cairo, CUPS, DBus, DRM, GBM/Mesa/libGL, GLib, GTK3, NSPR, NSS, Pango,
+X11/XCB/Xext/Xfixes/Xrandr/Xcomposite/Xdamage/xshmfence, `libxkbcommon`, Fontconfig,
+Freetype, plus Liberation/DejaVu fonts.
+
+**Sandbox tradeoff (Option A):** the root runner may result in Chromium running without its
+internal sandbox. This is accepted for the trusted, one-job, throwaway guest. Do not add
+extra `--no-sandbox` flags unless a real Playwright launcher requires them.
 
 ## Support boundary
 
@@ -467,6 +555,7 @@ is the retained harness (not a consuming app repo):
 |----------|---------|
 | `node-validation.yml` | Single-runner Node / nix-ld compatibility |
 | `pool-concurrency.yml` | Elastic pool: 3 overlapping lightweight jobs → scale / saturate / drain |
+| `e2e-platform-smoke.yml` | Podman compose + Playwright Chromium combined smoke (`fixtures/ci-runner-e2e/`; `workflow_dispatch` only) |
 
 Candidate Node check:
 
@@ -479,6 +568,19 @@ gh workflow run node-validation.yml -R "$REPO" --ref main
 gh run watch -R "$REPO"
 ```
 
+Podman / Playwright / combined platform smoke (after fixtures are vendored into the harness,
+or checked out from this repo inside the job):
+
+```bash
+# Inside a candidate GitHub Actions job (runs-on nixos-ephemeral-ci):
+bash fixtures/ci-runner-e2e/podman-smoke.sh
+bash fixtures/ci-runner-e2e/playwright-smoke.sh
+bash fixtures/ci-runner-e2e/combined-smoke.sh
+```
+
+Capture resource measurements from the combined job (`free -m`, `df`, Playwright cache size,
+`podman system df`, overlay growth). **Do not** change guest RAM/vCPU/`maxGuests` automatically
+if 4 GiB proves tight — report measurements for a human decision.
 Elastic pool concurrency (temporarily point `secrets.ciRunner.githubRepo` at the harness,
 `nixos-rebuild switch --impure`, `recycle-idle`; restore the consuming-app repo afterward).
 If the GitHub App installation does not include the harness repo, the provisioner falls
@@ -635,9 +737,10 @@ serial log; job stdout/stderr is also visible in the GitHub Actions run UI.
   `NIX_LD_LIBRARY_PATH` exported to the runner service. Verify inside a job:
   `ls -l /lib64/ld-linux-x86-64.so.2` (should point at `…-nix-ld-…/libexec/nix-ld`) and
   `echo "$NIX_LD $NIX_LD_LIBRARY_PATH"`.
-- Fix path: if a *specific* library is missing (`libfoo.so.N`), add that package to
-  `programs.nix-ld.libraries` in `modules/ci-runner-guest.nix` — the **smallest** addition
-  that resolves it, then rebuild + validate. Do not add broad library sets preemptively.
+- Fix path: if a *specific* library is missing (`libfoo.so.N`) beyond the Chromium set already
+  declared for Playwright, add that package to `programs.nix-ld.libraries` in
+  `modules/ci-runner-guest.nix` — the **smallest** addition that resolves it, then rebuild +
+  validate. Do not install a desktop environment to paper over missing `.so` files.
 
 **`<tool>: command not found` in a job step**
 - The job PATH is the `ci-runner-lifecycle` service `path` in `modules/ci-runner-guest.nix`
@@ -661,7 +764,9 @@ so the production reaper/reconciler ignore them.
 - `maxGuests = 10` is an architectural ceiling, **not** live-safe at 4 GiB/guest on the
   current host without right-sizing; live default is `3`.
 - Host control plane remains on `nixos-25.05`; only the disposable guest tracks supported stable.
-- No Docker/Podman in the guest (v1).
+- Docker Engine is not supplied in the guest; rootful Podman is guest-local only (no host socket).
+- Guest RAM/vCPU remain 4096 MiB / 2 vCPU and `maxGuests = 3` until combined E2E evidence
+  justifies a human sizing decision.
 
 ## Failure policy
 

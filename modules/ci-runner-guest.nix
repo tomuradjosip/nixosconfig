@@ -73,6 +73,24 @@ let
         log "DNS probe"
         ${pkgs.host}/bin/host example.com >/dev/null
         log "DNS ok"
+        # Optional internal HTTPS probes (from seed PROBE_URLS). Normal TLS verification.
+        if [[ -n "''${PROBE_URLS:-}" ]]; then
+          for url in $PROBE_URLS; do
+            log "internal HTTPS probe $url"
+            ${pkgs.curl}/bin/curl --fail --silent --show-error --max-time 10 "$url" >/dev/null
+            log "internal HTTPS ok $url"
+            # Record resolver view for the hostname portion when URL is https://host/...
+            hostpart="''${url#https://}"
+            hostpart="''${hostpart#http://}"
+            hostpart="''${hostpart%%/*}"
+            hostpart="''${hostpart%%:*}"
+            if [[ -n "$hostpart" ]]; then
+              log "resolve $hostpart"
+              ${pkgs.host}/bin/host "$hostpart"
+              log "resolve ok $hostpart"
+            fi
+          done
+        fi
         LAN_TARGET="''${LAN_PROBE_TARGET:-192.168.10.7}"
         log "LAN probe (expect failure) to $LAN_TARGET"
         if ${pkgs.curl}/bin/curl -fsS --connect-timeout 3 --max-time 5 "http://''${LAN_TARGET}/" >/dev/null 2>&1; then
@@ -90,6 +108,17 @@ let
           exit 2
         fi
         log "host SSH not reachable as expected"
+        # Approved host IP must not imply other host ports (80 / AdGuard UI).
+        if ${pkgs.coreutils}/bin/timeout 3 ${pkgs.bash}/bin/bash -c "echo >/dev/tcp/''${LAN_TARGET}/80" 2>/dev/null; then
+          log "ERROR: host HTTP port 80 appears open from guest"
+          exit 2
+        fi
+        log "host HTTP port 80 not reachable as expected"
+        if ${pkgs.coreutils}/bin/timeout 3 ${pkgs.bash}/bin/bash -c "echo >/dev/tcp/''${LAN_TARGET}/3000" 2>/dev/null; then
+          log "ERROR: AdGuard UI port 3000 appears open from guest"
+          exit 2
+        fi
+        log "AdGuard UI not reachable as expected"
         log "dummy workload complete"
         ;;
       runner)
@@ -176,13 +205,10 @@ in
     hostName = "ci-runner";
     useDHCP = true;
     firewall.enable = true;
-    nameservers = [
-      "1.1.1.1"
-      "8.8.8.8"
-    ];
-    dhcpcd.extraConfig = ''
-      nohook resolv.conf
-    '';
+    # Resolver comes from DHCP (libvirt dnsmasq on the CI gateway). That dnsmasq
+    # serves services.ciRunner.internalDnsHosts and forwards other names to
+    # public resolvers — guests must not bypass it with hardcoded 1.1.1.1/8.8.8.8,
+    # and must not use LAN AdGuard directly.
   };
 
   time.timeZone = "UTC";

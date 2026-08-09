@@ -37,9 +37,42 @@ Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the gu
 ## Network policy
 
 - **Network:** libvirt NAT `ci-net`, bridge `virbr-ci`, subnet `192.168.67.0/24`
-- **DNS:** guest uses public resolvers `1.1.1.1` / `8.8.8.8` (not LAN AdGuard)
-- **FORWARD:** deny CI → RFC1918; allow Internet HTTPS via NAT; optional `services.ciRunner.internalAllowTcp`
-- **INPUT on `virbr-ci`:** DHCP only; reject host SSH and other host services
+- **DNS:** guest uses DHCP → libvirt dnsmasq on the CI gateway (`192.168.67.1`). That dnsmasq serves only `services.ciRunner.internalDnsHosts` as static records and forwards all other names to public resolvers (`1.1.1.1` / `8.8.8.8`). Guests do **not** use LAN AdGuard or the router resolver, so other internal names are not visible by default.
+- **FORWARD:** deny CI → RFC1918; allow Internet HTTPS via NAT; optional `services.ciRunner.internalAllowTcp` for exceptions to *other* private hosts
+- **INPUT on `virbr-ci`:** DHCP + DNS to the CI gateway only; optional `services.ciRunner.hostAllowTcp` for narrow host-local TCP exceptions; reject SSH, AdGuard UI, and all other host services
+
+### Explicit internal hostname access
+
+Approved internal HTTPS dependencies are configured generically — hostname in host config, not special-cased in module logic:
+
+```nix
+services.ciRunner = {
+  internalDnsHosts = [
+    { name = "homepage.iktstudio.com"; address = "192.168.10.7"; }
+  ];
+  # Case A — destination IP is this NixOS host (Traefik on br0) → INPUT
+  hostAllowTcp = [
+    { address = "192.168.10.7"; port = 443; }
+  ];
+  # Case B — destination is another private host → FORWARD (unused for Homepage)
+  # internalAllowTcp = [ { address = "192.168.10.x"; port = 443; } ];
+  validationUrls = [ "https://homepage.iktstudio.com/" ];
+};
+```
+
+| Knob | Path | Meaning |
+|------|------|---------|
+| `internalDnsHosts` | ci-net dnsmasq | Name → IP inside CI only |
+| `hostAllowTcp` | iptables **INPUT** (`ci-runner-in`) | CI → host-local `address:port` |
+| `internalAllowTcp` | iptables **FORWARD** (`ci-runner-fwd`) | CI → other RFC1918 `address:port` |
+
+**Why INPUT vs FORWARD matters:** `homepage.iktstudio.com` resolves to `192.168.10.7`, which is this host's `br0` address where Traefik publishes `:443`. Packets from `virbr-ci` to a local host address hit **INPUT**, not FORWARD. A FORWARD-only allowlist would not open the path. Broad LAN access (`CI → 192.168.10.0/24`) remains denied.
+
+**TLS:** guests must use normal certificate verification (`curl` without `-k` / `--insecure`).
+
+**Shared Traefik IP limitation:** allowing `192.168.10.7:443` permits TCP to every TLS virtual host terminated on that same Traefik listener if the guest supplies another Host/SNI. Layer 3/4 filtering cannot provide hostname isolation. Acceptable for the current trust model (disposable CI + explicit allowlist); a stronger hostname ACL would require an application-layer proxy, not iptables.
+
+**DNS is not authorization:** resolving a name (or guessing an IP) does not grant access. Firewall rules remain the boundary.
 
 ## Modules and units
 
@@ -51,8 +84,10 @@ Guests do **not** attach to `br0`. Docker/Podman are **not** installed in the gu
 | `modules/ci-runner-guest.nix` | Guest image definition (stable NixOS + nix-ld) |
 | `packages/ci-runner-guest-image.nix` | qcow2 image build (guest = `nixpkgs-guest`) |
 | `packages/ci-runner-provisioner.nix` | `ci-runnerctl` |
+| `packages/ci-runner-network-lib.nix` | Pure DNS/iptables render helpers (unit-tested) |
 | `packages/ci-runner-pool.py` | Deterministic pool planner (pure; unit-tested) |
 | `tests/ci_runner_pool_test.py` | Planner unit tests (31 cases) |
+| `tests/ci_runner_network_test.py` | Network render unit tests (DNS + INPUT/FORWARD) |
 
 **systemd:**
 
@@ -413,8 +448,16 @@ sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/
 
 | Mode | Behaviour |
 |------|-----------|
-| Default (no `--github-repo`) | Dummy isolation: HTTPS/DNS/LAN/SSH probes, `ci-candidate-*` domain, trap cleanup, retain serial log. Never touches production spare, `install-base`, or `current.qcow2`. |
+| Default (no `--github-repo`) | Dummy isolation: HTTPS/DNS/LAN/SSH/port probes, `ci-candidate-*` domain, trap cleanup, retain serial log. Never touches production spare, `install-base`, or `current.qcow2`. |
+| `--probe-url URL` | Optional (repeatable). Runs `curl --fail` with normal TLS against each URL inside the disposable guest. Defaults to `services.ciRunner.validationUrls` when omitted. |
 | `--github-repo OWNER/REPO` | Explicit GitHub validation. Registration token from `CI_RUNNER_REG_TOKEN` or `gh api` — **not** the production GitHub App (keeps validation harness auth separate). Waits for guest poweroff up to `--timeout` (default 240s). |
+
+Probe an approved internal dependency without editing scripts:
+
+```bash
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
+  --probe-url https://homepage.iktstudio.com/
+```
 
 **Infrastructure regression harness (keep small / non-application).**
 [`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation)
@@ -465,7 +508,7 @@ sudo ci-runnerctl reap-boot           # fail-closed: destroy all production CI g
 sudo ci-runnerctl reconcile           # plan + destroy stale + restore idle capacity
 sudo ci-runnerctl provision           # provision one ephemeral runner guest (GitHub enabled)
 sudo ci-runnerctl dummy               # isolation proof without GitHub (production prefix)
-sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]
+sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]
 sudo ci-runnerctl install-base <qcow2>
 sudo ci-runnerctl recycle-idle
 sudo ci-runnerctl build-hint
@@ -474,6 +517,25 @@ sudo ci-runnerctl destroy-all         # production prefix only (never candidates
 journalctl -u ci-runner-provisioner -u ci-runner-reaper -u ci-runner-freshness -t ci-runnerctl -f
 virsh list --all
 virsh net-info ci-net
+virsh net-dumpxml ci-net              # inspect <dns> static hosts + forwarders
+```
+
+### Troubleshooting internal HTTPS from CI
+
+Distinguish failure layers:
+
+| Symptom | Likely cause | Check |
+|---------|--------------|-------|
+| Name does not resolve | Missing `internalDnsHosts` / guest not using CI DNS | From guest: `host homepage.iktstudio.com`; on host: `virsh net-dumpxml ci-net` `<dns>` section; guest `resolv.conf` should list `192.168.67.1` |
+| Resolves, TCP times out / rejected | Missing or wrong `hostAllowTcp` / `internalAllowTcp` | `sudo iptables -L ci-runner-in -n -v`; `sudo iptables -L ci-runner-fwd -n -v` |
+| TCP works, TLS fails | Cert / SNI / Traefik | From guest: `curl -v https://homepage.iktstudio.com/` (no `-k`); confirm Traefik cert covers the name |
+| TLS works, HTTP error | Homepage / Traefik routing | Inspect Traefik/Homepage logs; host-side `curl -fsS https://homepage.iktstudio.com/` |
+
+```text
+DNS fails        → ci-net dnsmasq / internalDnsHosts
+DNS ok, TCP fails → INPUT (hostAllowTcp) or FORWARD (internalAllowTcp)
+TCP ok, TLS fails → certificate / SNI / Traefik
+TLS ok, HTTP fails → Homepage / Traefik router
 ```
 
 ### `status` output

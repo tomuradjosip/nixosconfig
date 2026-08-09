@@ -74,6 +74,7 @@
           guestVcpus = 2;
           lanProbeTarget = "192.168.10.7";
           provisioningGraceSec = 300;
+          validationUrls = [ ];
           githubEnable = false;
           githubOwner = "";
           githubRepo = "";

@@ -14,6 +14,7 @@
   guestVcpus,
   lanProbeTarget,
   provisioningGraceSec ? 300,
+  validationUrls ? [ ],
   githubEnable,
   githubOwner,
   githubRepo,
@@ -101,6 +102,7 @@ let
       --subst-var-by guestVcpus ${lib.escapeShellArg (toString guestVcpus)} \
       --subst-var-by lanProbeTarget ${lib.escapeShellArg lanProbeTarget} \
       --subst-var-by provisioningGraceSec ${lib.escapeShellArg (toString provisioningGraceSec)} \
+      --subst-var-by validationUrls ${lib.escapeShellArg (lib.concatStringsSep " " validationUrls)} \
       --subst-var-by githubEnable ${lib.escapeShellArg (if githubEnable then "1" else "0")} \
       --subst-var-by githubOwner ${lib.escapeShellArg githubOwner} \
       --subst-var-by githubRepo ${lib.escapeShellArg githubRepo} \

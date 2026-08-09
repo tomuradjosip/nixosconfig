@@ -177,6 +177,54 @@ in
       };
     };
 
+    # Explicit hostname → address mappings served by libvirt dnsmasq on ci-net.
+    # Guests resolve these without LAN AdGuard / router DNS. Public names still
+    # resolve via public forwarders (1.1.1.1 / 8.8.8.8). DNS is not authorization;
+    # pair with hostAllowTcp / internalAllowTcp for the actual TCP exception.
+    internalDnsHosts = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            name = lib.mkOption {
+              type = lib.types.str;
+              description = "DNS name to resolve inside ci-net (e.g. homepage.example.com).";
+            };
+            address = lib.mkOption {
+              type = lib.types.str;
+              description = "IPv4 address returned for this name.";
+            };
+          };
+        }
+      );
+      default = [ ];
+      description = ''
+        Static DNS host records for the dedicated CI libvirt network. Does not
+        expose general internal DNS. Empty preserves public-only resolution via
+        the CI network's public forwarders.
+      '';
+    };
+
+    # Host-local services (INPUT path): CI guest → approved host address:port.
+    # Use when the destination IP is configured on this NixOS host (e.g. Traefik
+    # on br0). Distinct from internalAllowTcp (FORWARD to other private hosts).
+    hostAllowTcp = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            address = lib.mkOption { type = lib.types.str; };
+            port = lib.mkOption { type = lib.types.port; };
+          };
+        }
+      );
+      default = [ ];
+      description = ''
+        Narrow INPUT exceptions from the CI bridge to host-local TCP listeners.
+        Inserted before the general virbr-ci reject. Does not open SSH, AdGuard,
+        or other host services unless listed.
+      '';
+    };
+
+    # Forwarded private destinations (FORWARD path): CI guest → other RFC1918 host.
     internalAllowTcp = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
@@ -187,8 +235,25 @@ in
         }
       );
       default = [ ];
-      description = "Explicit internal TCP exceptions CI guests may reach (empty for v1).";
+      description = ''
+        Explicit FORWARD TCP exceptions to non-host private addresses (inserted
+        before the RFC1918 reject). Prefer hostAllowTcp when the destination is
+        this host. Empty preserves full private-network denial.
+      '';
     };
+
+    # Optional HTTPS URLs probed during dummy / validate-candidate runs.
+    # Not hard-required for every candidate image build unless the operator
+    # passes --probe-url or configures this list.
+    validationUrls = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = ''
+        Default URLs for optional disposable-guest HTTPS probes (normal TLS
+        verification). Operators can also pass --probe-url to validate-candidate.
+      '';
+    };
+
     package = lib.mkOption {
       type = lib.types.package;
       internal = true;
@@ -213,6 +278,7 @@ in
           guestVcpus
           lanProbeTarget
           provisioningGraceSec
+          validationUrls
           ;
         githubEnable = cfg.github.enable;
         githubOwner = cfg.github.owner;

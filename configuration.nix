@@ -39,6 +39,25 @@ in
     github.enable = true;
     desiredIdleCapacity = 1;
     maxGuests = 3;
+
+    # Explicit CI-only DNS for internal HTTPS deps (not LAN AdGuard).
+    # homepage.iktstudio.com terminates on this host's Traefik (br0 192.168.10.7:443)
+    # → INPUT path via hostAllowTcp, not FORWARD/internalAllowTcp.
+    internalDnsHosts = [
+      {
+        name = "homepage.iktstudio.com";
+        address = "192.168.10.7";
+      }
+    ];
+    hostAllowTcp = [
+      {
+        address = "192.168.10.7";
+        port = 443;
+      }
+    ];
+    # Optional disposable-guest probe; also overridable via
+    # `ci-runnerctl validate-candidate … --probe-url …`.
+    validationUrls = [ "https://homepage.iktstudio.com/" ];
   };
   # Enable flakes
   nix.settings.experimental-features = [

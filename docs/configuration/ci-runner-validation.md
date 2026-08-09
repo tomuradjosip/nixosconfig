@@ -249,7 +249,7 @@ exercised on the live host on **2026-08-09**.
 Do not raise `maxGuests` toward the architectural ceiling of 10 without re-checking
 MemAvailable / vCPU headroom (prefer right-sizing guest RAM first).
 
-### Unit tests (deterministic planner)
+### Unit tests (deterministic planner + network render)
 
 | Item | Result |
 |------|--------|
@@ -257,6 +257,8 @@ MemAvailable / vCPU headroom (prefer right-sizing guest RAM first).
 | Tests | `tests/ci_runner_pool_test.py` |
 | Count | **31** tests (includes live `maxGuests=3` ceiling cases) |
 | Run | `python3 tests/ci_runner_pool_test.py` → all OK |
+| Network lib | `packages/ci-runner-network-lib.nix` |
+| Network tests | `tests/ci_runner_network_test.py` → **8** OK (DNS hosts, INPUT vs FORWARD, empty allowlists) |
 
 Coverage includes: idle deficit / `maxGuests` arithmetic, provisioning counts toward idle
 supply, fail-closed GitHub outage (retain running, no provision), stale/shutting_down
@@ -268,12 +270,13 @@ pool.
 Command (see [platform docs](ci-runner.md#validating-a-candidate-image)):
 
 ```bash
-sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]
+sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]
 ```
 
 | Check | Expected / evidence |
 |-------|---------------------|
-| Default dummy isolation | PASS markers: public HTTPS, DNS, LAN HTTP/ping blocked, host SSH unreachable, dummy workload complete; serial retained; production domain set unchanged |
+| Default dummy isolation | PASS markers: public HTTPS, DNS, LAN HTTP/ping blocked, host SSH unreachable, host :80 / AdGuard :3000 unreachable, dummy workload complete; serial retained; production domain set unchanged |
+| `--probe-url` / `validationUrls` | Optional internal HTTPS with normal TLS; marker `internal HTTPS ok <url>` |
 | Namespace | Guest name `ci-candidate-*`; production reaper/reconciler ignore it |
 | No production mutation | Does not call `install-base` / rewrite `current.qcow2` / destroy idle spare |
 | `--github-repo` auth | `gh api` registration token or `CI_RUNNER_REG_TOKEN` — **not** the production GitHub App |
@@ -453,3 +456,93 @@ guest: ci-ephemeral-20260809184809-305
 - Host NixOS version remains out of scope for this acceptance (`nixos-25.05`)
 - Live `maxGuests=10` at 4 GiB/guest is **not** safe on this host
 - GitHub App installation was **not** expanded to the harness (fallback used instead)
+
+## Internal Homepage HTTPS allowlist (2026-08-09)
+
+**Date/time:** 2026-08-09 ~19:12–19:19 CEST  
+**Goal:** make `https://homepage.iktstudio.com/` reachable from disposable CI guests with
+normal TLS verification, without broad LAN or internal DNS access.
+
+### Topology (discovered, not assumed)
+
+| Fact | Value |
+|------|-------|
+| Hostname | `homepage.iktstudio.com` |
+| Resolved address | **`192.168.10.7`** (this host’s `br0`) |
+| Public DNS (`1.1.1.1` / `8.8.8.8`) | NXDOMAIN |
+| LAN DNS path on host | router `192.168.10.1` (AdGuard on `.7` also NXDOMAIN for this name) |
+| Service | Traefik (Podman rootlessport) listening on host `:443` |
+| Packet path from CI | **INPUT** (`ci-runner-in`), not FORWARD |
+| Required port | TCP **443** only |
+
+### Configuration applied
+
+```nix
+services.ciRunner = {
+  internalDnsHosts = [
+    { name = "homepage.iktstudio.com"; address = "192.168.10.7"; }
+  ];
+  hostAllowTcp = [
+    { address = "192.168.10.7"; port = 443; }
+  ];
+  validationUrls = [ "https://homepage.iktstudio.com/" ];
+};
+```
+
+- libvirt `ci-net` dnsmasq: static host + public forwarders `1.1.1.1` / `8.8.8.8`
+- Guest resolver: DHCP → `192.168.67.1` (no hardcoded public DNS bypass)
+- `internalAllowTcp` left empty (FORWARD path not used for this dependency)
+
+### Positive validation (disposable candidate)
+
+```bash
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
+  --probe-url https://homepage.iktstudio.com/
+→ PASS: candidate dummy validation
+production spare undisturbed: ci-ephemeral-20260809191643-11528
+candidate serial: /data/ci/logs/ci-candidate-20260809191734-2737.serial.log
+```
+
+Guest serial evidence:
+
+```
+public HTTPS ok
+DNS ok
+internal HTTPS ok https://homepage.iktstudio.com/
+homepage.iktstudio.com has address 192.168.10.7
+LAN HTTP blocked as expected
+LAN ping blocked as expected
+host SSH not reachable as expected
+host HTTP port 80 not reachable as expected
+AdGuard UI not reachable as expected
+dummy workload complete
+```
+
+### Negative isolation (guest serial + CI-subnet netns)
+
+| Probe | Result |
+|-------|--------|
+| `https://homepage.iktstudio.com/` (TLS verify) | **allowed** (HTTP 200) |
+| Public HTTPS / public DNS | **allowed** |
+| Unmapped `grafana.iktstudio.com` via CI DNS | **NXDOMAIN** (not leaked from LAN DNS) |
+| Other LAN IP `192.168.10.1:80` | **denied** |
+| Approved IP `:22` (SSH) | **denied** |
+| Approved IP `:80` | **denied** |
+| AdGuard UI `:3000` | **denied** |
+| AdGuard DNS `192.168.10.7:53` | **denied** |
+
+### Shared Traefik limitation
+
+`hostAllowTcp` permits TCP to `192.168.10.7:443`. Any other TLS virtual host on that same
+Traefik listener is reachable at L4 if the guest knows the name/SNI. Accepted for the
+current trust model; hostname ACLs would need an application-layer proxy.
+
+### Final live pool (after install-base + recycle-idle)
+
+```
+busy=0 idle=1 total=1 maxGuests=3 saturated=false github_ok=true
+BASE_ID=7e3b6427bda13602  guest=ci-ephemeral-20260809191903-31234
+```
+
+**Verdict:** `https://homepage.iktstudio.com/` is an approved and validated internal
+dependency reachable from disposable CI runners without weakening general LAN isolation.

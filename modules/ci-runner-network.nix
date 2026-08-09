@@ -11,6 +11,8 @@ let
   netName = cfg.networkName;
   bridge = cfg.bridgeName;
   gw = cfg.gatewayAddress;
+  netLib = import ../packages/ci-runner-network-lib.nix { inherit lib; };
+
   # 192.168.67.0 -> expect /24
   networkXml = pkgs.writeText "ci-net.xml" ''
     <network>
@@ -21,7 +23,7 @@ let
           <port start='1024' end='65535'/>
         </nat>
       </forward>
-      <ip address='${gw}' netmask='255.255.255.0'>
+    ${netLib.renderDnsXml cfg.internalDnsHosts}  <ip address='${gw}' netmask='255.255.255.0'>
         <dhcp>
           <range start='${cfg.dhcpRangeStart}' end='${cfg.dhcpRangeEnd}'/>
         </dhcp>
@@ -29,9 +31,9 @@ let
     </network>
   '';
 
-  allowRules = lib.concatMapStrings (ex: ''
-    iptables -A ci-runner-fwd -s ${cfg.subnetCidr} -d ${ex.address} -p tcp --dport ${toString ex.port} -j ACCEPT
-  '') cfg.internalAllowTcp;
+  fwdAllowRules = netLib.renderFwdAllowRules cfg.subnetCidr cfg.internalAllowTcp;
+  hostAllowRules = netLib.renderHostAllowRules cfg.hostAllowTcp;
+  gatewayDnsRules = netLib.renderGatewayDnsAllowRules gw;
 in
 {
   config = lib.mkIf cfg.enable {
@@ -61,21 +63,33 @@ in
       path = [
         pkgs.libvirt
         pkgs.coreutils
+        pkgs.gawk
       ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
       };
+      # Redefine only when the desired XML content changes (stamp under /data/ci).
+      # Avoids tearing down ci-net (and disconnecting idle guests) on every boot.
       script = ''
         set -euo pipefail
         XML=/etc/libvirt/qemu/networks/${netName}.xml
+        STAMP=${cfg.dataDir}/state/${netName}.xml.sha256
+        mkdir -p ${cfg.dataDir}/state
+        HASH=$(sha256sum "$XML" | awk '{print $1}')
+        NEED_REDEFINE=0
         if ! virsh net-info ${netName} >/dev/null 2>&1; then
+          NEED_REDEFINE=1
+        elif [[ ! -f "$STAMP" ]] || [[ "$(cat "$STAMP")" != "$HASH" ]]; then
+          NEED_REDEFINE=1
+        fi
+        if [[ "$NEED_REDEFINE" -eq 1 ]]; then
+          if virsh net-info ${netName} >/dev/null 2>&1; then
+            virsh net-destroy ${netName} 2>/dev/null || true
+            virsh net-undefine ${netName} 2>/dev/null || true
+          fi
           virsh net-define "$XML"
-        else
-          # Keep definition aligned with NixOS config without touching unrelated networks.
-          virsh net-destroy ${netName} 2>/dev/null || true
-          virsh net-undefine ${netName} 2>/dev/null || true
-          virsh net-define "$XML"
+          echo "$HASH" >"$STAMP"
         fi
         virsh net-autostart ${netName}
         virsh net-start ${netName} 2>/dev/null || true
@@ -88,8 +102,8 @@ in
       iptables -N ci-runner-fwd 2>/dev/null || iptables -F ci-runner-fwd
       iptables -C FORWARD -j ci-runner-fwd 2>/dev/null || iptables -I FORWARD 1 -j ci-runner-fwd
       iptables -A ci-runner-fwd -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
-      # Explicit internal exceptions (if any)
-      ${allowRules}
+      # Explicit FORWARD exceptions to other private hosts (if any)
+      ${fwdAllowRules}
       # Deny RFC1918 destinations from CI subnet (LAN, Podman, other private)
       iptables -A ci-runner-fwd -s ${cfg.subnetCidr} -d 10.0.0.0/8 -j REJECT --reject-with icmp-admin-prohibited
       iptables -A ci-runner-fwd -s ${cfg.subnetCidr} -d 172.16.0.0/12 -j REJECT --reject-with icmp-admin-prohibited
@@ -102,7 +116,11 @@ in
       iptables -A ci-runner-in -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
       # DHCP to libvirt dnsmasq on the CI bridge
       iptables -A ci-runner-in -p udp --dport 67 -j ACCEPT
-      # Deny all other host services (SSH, AdGuard, Traefik, libvirt, etc.)
+      # DNS to CI gateway dnsmasq only (explicit internalDnsHosts + public forwarders)
+      ${gatewayDnsRules}
+      # Narrow host-local TCP exceptions (e.g. Traefik :443 on br0) before reject
+      ${hostAllowRules}
+      # Deny all other host services (SSH, AdGuard, libvirt, unlisted Traefik ports, etc.)
       iptables -A ci-runner-in -j REJECT --reject-with icmp-admin-prohibited
     '';
 

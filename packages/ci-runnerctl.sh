@@ -15,6 +15,8 @@ MAX_GUESTS=@maxGuests@
 MEM=@guestMemoryMiB@
 VCPUS=@guestVcpus@
 LAN_PROBE=@lanProbeTarget@
+# Space-separated default probe URLs from services.ciRunner.validationUrls
+VALIDATION_URLS=@validationUrls@
 GH_ENABLE=@githubEnable@
 GH_OWNER=@githubOwner@
 GH_REPO=@githubRepo@
@@ -258,12 +260,17 @@ make_seed_iso() {
   local mode="$2"
   local seed_dir="$DATA_DIR/seeds/${name}.dir"
   local seed_iso="$DATA_DIR/seeds/${name}.iso"
+  # Optional 5th arg (dummy) or ignored: space-separated HTTPS probe URLs.
+  local probe_urls="${PROBE_URLS_OVERRIDE:-${VALIDATION_URLS:-}}"
   mkdir -p "$DATA_DIR/seeds"
   rm -rf "$seed_dir"
   mkdir -p "$seed_dir"
   {
     echo "MODE=$mode"
     echo "LAN_PROBE_TARGET=$LAN_PROBE"
+    if [[ -n "$probe_urls" ]]; then
+      echo "PROBE_URLS=$probe_urls"
+    fi
     if [[ "$mode" == "runner" ]]; then
       echo "REPO_URL=$3"
       echo "REGISTRATION_TOKEN=$4"
@@ -960,26 +967,39 @@ validate_candidate() {
   shift || true
   local timeout=240
   local gh_repo=""
+  local probe_urls=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout)
-        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]"; return 2; }
+        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
         ;;
       --github-repo)
-        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]"; return 2; }
+        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        ;;
+      --probe-url)
+        [[ -n "${2:-}" ]] || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        probe_urls+=("$2")
+        shift 2
         ;;
       *)
         echo "unknown option: $1"
-        echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]"
+        echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"
         return 2
         ;;
     esac
   done
   [[ -n "$qcow" && -f "$qcow" ]] || {
-    echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]"
+    echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"
     return 2
   }
   qcow=$(readlink -f "$qcow")
+  # CLI --probe-url overrides configured validationUrls for this run; otherwise use defaults.
+  if [[ ${#probe_urls[@]} -gt 0 ]]; then
+    PROBE_URLS_OVERRIDE="${probe_urls[*]}"
+  else
+    PROBE_URLS_OVERRIDE="${VALIDATION_URLS:-}"
+  fi
+  export PROBE_URLS_OVERRIDE
 
   # Snapshot production guests so we can prove they were undisturbed.
   local before_prod before_spare
@@ -1116,6 +1136,8 @@ validate_candidate() {
       "LAN HTTP blocked as expected" \
       "LAN ping blocked as expected" \
       "host SSH not reachable as expected" \
+      "host HTTP port 80 not reachable as expected" \
+      "AdGuard UI not reachable as expected" \
       "dummy workload complete"
     do
       if ! grep -qF "$needle" "$serial" 2>/dev/null; then
@@ -1123,6 +1145,15 @@ validate_candidate() {
         missing=1
       fi
     done
+    if [[ -n "${PROBE_URLS_OVERRIDE:-}" ]]; then
+      local url
+      for url in $PROBE_URLS_OVERRIDE; do
+        if ! grep -qF "internal HTTPS ok $url" "$serial" 2>/dev/null; then
+          echo "FAIL: serial missing probe marker for $url"
+          missing=1
+        fi
+      done
+    fi
     if [[ "$missing" -ne 0 ]]; then
       echo "FAIL: dummy validation markers incomplete"
       rc=1
@@ -1258,7 +1289,7 @@ usage: ci-runnerctl <command>
   github-check
   provision
   dummy [timeout_seconds]
-  validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]
+  validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]...
   destroy <domain>
   destroy-all
   metrics

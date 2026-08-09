@@ -322,6 +322,44 @@ Operational install/recycle (once the candidate passes):
 > recycle the idle spare. This self-heals (reconcile provisions a fresh spare) and is
 > expected during upgrades of the platform code itself.
 
+## Validating a candidate image (regression harness)
+
+Validate a candidate **before** `install-base`, without disturbing the live spare. The key
+safety rule: boot candidate guests under a name that does **not** start with `ci-ephemeral-`
+(e.g. `ci-candidate-…`), because the reaper/reconciler only ever act on `ci-ephemeral-*`
+domains. Manually create an overlay over the candidate qcow2, build a `CI_SEED` ISO (label
+`CI_SEED`, containing `MODE=` + probe/runner vars — same schema as `make_seed_iso` in
+`packages/ci-runner-provisioner.nix`), then `virt-install` onto `ci-net` with a serial log.
+
+**Node compatibility regression repo.** A dedicated throwaway repo,
+[`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation),
+holds a `node-validation.yml` workflow (`runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]`)
+that exercises the generic Node path: `actions/setup-node` (Node 24) → `node`/`npm` → ordinary
+JS → `npm install` of a prebuilt native tool (esbuild) → run it + a package script → Corepack
+`pnpm` bootstrap. It intentionally contains **no** application code and is kept for future
+debugging. It is **not** used by the live platform (which is scoped to the real app repo via
+the GitHub App); it is served on demand by a candidate runner registered with a directly
+minted token, so it never touches the App or the production repo.
+
+Re-run it against a candidate (real disposable GitHub job), booting under a `ci-candidate-*`
+name so the live spare is untouched:
+
+```bash
+REPO=tomuradjosip/nixos-ci-runner-validation
+# 1. Mint a repo-scoped registration token via gh (uses your user token, not the App):
+TOKEN=$(gh api -X POST "/repos/$REPO/actions/runners/registration-token" -q .token)
+# 2. Boot a candidate runner guest named ci-candidate-* over the candidate qcow2, with a
+#    CI_SEED ISO carrying MODE=runner / REPO_URL=https://github.com/$REPO / REGISTRATION_TOKEN
+#    / RUNNER_NAME / RUNNER_LABELS (see make_seed_iso + define_and_start for the exact XML).
+# 3. Wait for "Listening for Jobs" in the serial log, then dispatch:
+gh workflow run node-validation.yml -R "$REPO" --ref main
+gh run watch -R "$REPO"      # expect: success; runner deregisters + guest powers off
+# 4. Tear the candidate down (virsh destroy/undefine --remove-all-storage, rm overlay/seed).
+```
+
+Dummy isolation proof for a candidate uses the same non-`ci-ephemeral-*` boot with
+`MODE=dummy` (no GitHub); expect the probe lines in [Troubleshooting](#troubleshooting).
+
 ## Operations
 
 ```bash
@@ -365,6 +403,53 @@ services.ciRunner.enable = false;
 ```
 
 Then rebuild, and optionally `sudo ci-runnerctl destroy-all` before disabling if the tool is still on PATH.
+
+## Troubleshooting
+
+**Where to look first**
+
+| Source | Command |
+|--------|---------|
+| Guest boot + runner + job output (per guest) | `sudo sed 's/\x1b\[[0-9;]*m//g' /data/ci/logs/<domain>.serial.log` (strip ANSI) |
+| Host provisioner/reaper/freshness | `journalctl -u ci-runner-provisioner -u ci-runner-reaper -u ci-runner-reaper-soft -u ci-runner-freshness -t ci-runnerctl` |
+| Current platform state | `sudo ci-runnerctl status` / `sudo ci-runnerctl metrics` |
+| GitHub App creds/permissions | `sudo ci-runnerctl github-check` (registers nothing) |
+| Runner version vs latest | `sudo ci-runnerctl freshness` |
+
+The guest has **no SSH** (serial console only, by design). All guest diagnostics come from the
+serial log; job stdout/stderr is also visible in the GitHub Actions run UI.
+
+**Runner won't register / picks up no jobs**
+- `Current runner version` in the serial log must be **≥ 2.329.0** and within **30 days** of
+  the latest release (`ci-runnerctl freshness` → `update_available`). If behind, bump
+  `nixpkgs-unstable`, rebuild, `install-base`, recycle.
+- Job stuck "queued": confirm the workflow `runs-on` labels match `nixos-ephemeral-ci,self-hosted,Linux,X64`.
+
+**Downloaded binary fails to run (ELF / loader issues)** — the most likely NixOS-specific class:
+- Symptoms: `No such file or directory` when executing a downloaded binary that clearly
+  exists, `cannot execute: required file not found`, or `error while loading shared libraries`.
+- These mean the binary's hardcoded interpreter (`/lib64/ld-linux-x86-64.so.2`) or a shared
+  library isn't resolvable. This platform relies on `programs.nix-ld` (guest) + `NIX_LD` /
+  `NIX_LD_LIBRARY_PATH` exported to the runner service. Verify inside a job:
+  `ls -l /lib64/ld-linux-x86-64.so.2` (should point at `…-nix-ld-…/libexec/nix-ld`) and
+  `echo "$NIX_LD $NIX_LD_LIBRARY_PATH"`.
+- Fix path: if a *specific* library is missing (`libfoo.so.N`), add that package to
+  `programs.nix-ld.libraries` in `modules/ci-runner-guest.nix` — the **smallest** addition
+  that resolves it, then rebuild + validate. Do not add broad library sets preemptively.
+
+**`<tool>: command not found` in a job step**
+- The job PATH is the `ci-runner-lifecycle` service `path` in `modules/ci-runner-guest.nix`
+  (plus whatever `setup-*` actions prepend). If a *generic* Linux CI utility is missing, add
+  its package there (this is how `tar`/`gzip`/… were added). Application toolchains are **not**
+  added here — repositories install those via `actions/setup-*`.
+
+**Guest didn't power off / overlay left behind**
+- `uncertain guest == destroy`: `sudo ci-runnerctl destroy <ci-ephemeral-…>` (prefix-guarded)
+  or `sudo ci-runnerctl reap` (soft, leaves running guests). `ci_runner_teardown_failures_total`
+  and `ci_runner_orphan_cleanup_total` track these.
+
+**Candidate validation** — see [Validating a candidate image](#validating-a-candidate-image-regression-harness);
+always boot candidates as `ci-candidate-*` so the reaper leaves the live spare alone.
 
 ## Failure policy
 

@@ -167,9 +167,13 @@ Reconciled the platform after the initial validation. Architecture unchanged; fi
   never edits `flake.lock`.
 
 ### Generic Node compatibility — real disposable GitHub Actions run
-Run on a **throwaway** private repo `tomuradjosip/nixos-ci-runner-validation` (shopforge was
-**not** used or modified), served by an ephemeral runner booted from the 26.05 candidate
-image (job `nixos-node-validation`, result **Succeeded**):
+Run on a dedicated private repo
+[`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation)
+(shopforge was **not** used or modified), served by an ephemeral runner booted from the 26.05
+candidate image (job `nixos-node-validation`, result **Succeeded**). This repo is
+**intentionally retained** as a reusable Node-compatibility regression harness — see
+[Validating a candidate image](ci-runner.md#validating-a-candidate-image-regression-harness)
+for how to re-run it against a future candidate:
 
 ```
 Set up job            # actions/checkout extracted with tar (see fix below)

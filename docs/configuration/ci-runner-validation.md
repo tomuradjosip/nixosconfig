@@ -457,21 +457,24 @@ guest: ci-ephemeral-20260809184809-305
 - Live `maxGuests=10` at 4 GiB/guest is **not** safe on this host
 - GitHub App installation was **not** expanded to the harness (fallback used instead)
 
-## Internal Homepage HTTPS allowlist (2026-08-09)
+## Internal Verdaccio HTTPS allowlist (2026-08-09)
 
-**Date/time:** 2026-08-09 ~19:12–19:19 CEST  
-**Goal:** make `https://homepage.iktstudio.com/` reachable from disposable CI guests with
+**Date/time:** 2026-08-09 ~19:12–19:25 CEST  
+**Goal:** make `https://verdaccio.iktstudio.com/` reachable from disposable CI guests with
 normal TLS verification, without broad LAN or internal DNS access.
+
+> Note: an earlier pass briefly configured `homepage.iktstudio.com` on the same Traefik IP;
+> the intended approved dependency is Verdaccio. Homepage was replaced (not kept alongside).
 
 ### Topology (discovered, not assumed)
 
 | Fact | Value |
 |------|-------|
-| Hostname | `homepage.iktstudio.com` |
+| Hostname | `verdaccio.iktstudio.com` |
 | Resolved address | **`192.168.10.7`** (this host’s `br0`) |
 | Public DNS (`1.1.1.1` / `8.8.8.8`) | NXDOMAIN |
-| LAN DNS path on host | router `192.168.10.1` (AdGuard on `.7` also NXDOMAIN for this name) |
-| Service | Traefik (Podman rootlessport) listening on host `:443` |
+| LAN DNS path on host | router `192.168.10.1` |
+| Service | Traefik (Podman rootlessport) listening on host `:443` → Verdaccio |
 | Packet path from CI | **INPUT** (`ci-runner-in`), not FORWARD |
 | Required port | TCP **443** only |
 
@@ -480,12 +483,12 @@ normal TLS verification, without broad LAN or internal DNS access.
 ```nix
 services.ciRunner = {
   internalDnsHosts = [
-    { name = "homepage.iktstudio.com"; address = "192.168.10.7"; }
+    { name = "verdaccio.iktstudio.com"; address = "192.168.10.7"; }
   ];
   hostAllowTcp = [
     { address = "192.168.10.7"; port = 443; }
   ];
-  validationUrls = [ "https://homepage.iktstudio.com/" ];
+  validationUrls = [ "https://verdaccio.iktstudio.com/" ];
 };
 ```
 
@@ -496,20 +499,20 @@ services.ciRunner = {
 ### Positive validation (disposable candidate)
 
 ```bash
-sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
-  --probe-url https://homepage.iktstudio.com/
+sudo ci-runnerctl validate-candidate /data/ci/base/current.qcow2 \
+  --probe-url https://verdaccio.iktstudio.com/
 → PASS: candidate dummy validation
-production spare undisturbed: ci-ephemeral-20260809191643-11528
-candidate serial: /data/ci/logs/ci-candidate-20260809191734-2737.serial.log
+production spare undisturbed: ci-ephemeral-20260809191903-31234
+candidate serial: /data/ci/logs/ci-candidate-20260809192337-25834.serial.log
 ```
 
-Guest serial evidence:
+Guest serial evidence (Verdaccio probe):
 
 ```
 public HTTPS ok
 DNS ok
-internal HTTPS ok https://homepage.iktstudio.com/
-homepage.iktstudio.com has address 192.168.10.7
+internal HTTPS ok https://verdaccio.iktstudio.com/
+verdaccio.iktstudio.com has address 192.168.10.7
 LAN HTTP blocked as expected
 LAN ping blocked as expected
 host SSH not reachable as expected
@@ -522,9 +525,9 @@ dummy workload complete
 
 | Probe | Result |
 |-------|--------|
-| `https://homepage.iktstudio.com/` (TLS verify) | **allowed** (HTTP 200) |
+| `https://verdaccio.iktstudio.com/` (TLS verify) | **allowed** (HTTP 200) |
 | Public HTTPS / public DNS | **allowed** |
-| Unmapped `grafana.iktstudio.com` via CI DNS | **NXDOMAIN** (not leaked from LAN DNS) |
+| Unmapped `grafana.iktstudio.com` / `homepage.iktstudio.com` via CI DNS | **NXDOMAIN** (not leaked from LAN DNS) |
 | Other LAN IP `192.168.10.1:80` | **denied** |
 | Approved IP `:22` (SSH) | **denied** |
 | Approved IP `:80` | **denied** |
@@ -537,12 +540,12 @@ dummy workload complete
 Traefik listener is reachable at L4 if the guest knows the name/SNI. Accepted for the
 current trust model; hostname ACLs would need an application-layer proxy.
 
-### Final live pool (after install-base + recycle-idle)
+### Final live pool
 
 ```
 busy=0 idle=1 total=1 maxGuests=3 saturated=false github_ok=true
-BASE_ID=7e3b6427bda13602  guest=ci-ephemeral-20260809191903-31234
+guest: ci-ephemeral-20260809192407-309  BASE_ID=7e3b6427bda13602
 ```
 
-**Verdict:** `https://homepage.iktstudio.com/` is an approved and validated internal
+**Verdict:** `https://verdaccio.iktstudio.com/` is an approved and validated internal
 dependency reachable from disposable CI runners without weakening general LAN isolation.

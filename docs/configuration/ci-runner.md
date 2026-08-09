@@ -48,15 +48,15 @@ Approved internal HTTPS dependencies are configured generically — hostname in 
 ```nix
 services.ciRunner = {
   internalDnsHosts = [
-    { name = "homepage.iktstudio.com"; address = "192.168.10.7"; }
+    { name = "verdaccio.iktstudio.com"; address = "192.168.10.7"; }
   ];
   # Case A — destination IP is this NixOS host (Traefik on br0) → INPUT
   hostAllowTcp = [
     { address = "192.168.10.7"; port = 443; }
   ];
-  # Case B — destination is another private host → FORWARD (unused for Homepage)
+  # Case B — destination is another private host → FORWARD (unused for Verdaccio)
   # internalAllowTcp = [ { address = "192.168.10.x"; port = 443; } ];
-  validationUrls = [ "https://homepage.iktstudio.com/" ];
+  validationUrls = [ "https://verdaccio.iktstudio.com/" ];
 };
 ```
 
@@ -66,7 +66,7 @@ services.ciRunner = {
 | `hostAllowTcp` | iptables **INPUT** (`ci-runner-in`) | CI → host-local `address:port` |
 | `internalAllowTcp` | iptables **FORWARD** (`ci-runner-fwd`) | CI → other RFC1918 `address:port` |
 
-**Why INPUT vs FORWARD matters:** `homepage.iktstudio.com` resolves to `192.168.10.7`, which is this host's `br0` address where Traefik publishes `:443`. Packets from `virbr-ci` to a local host address hit **INPUT**, not FORWARD. A FORWARD-only allowlist would not open the path. Broad LAN access (`CI → 192.168.10.0/24`) remains denied.
+**Why INPUT vs FORWARD matters:** `verdaccio.iktstudio.com` resolves to `192.168.10.7`, which is this host's `br0` address where Traefik publishes `:443`. Packets from `virbr-ci` to a local host address hit **INPUT**, not FORWARD. A FORWARD-only allowlist would not open the path. Broad LAN access (`CI → 192.168.10.0/24`) remains denied.
 
 **TLS:** guests must use normal certificate verification (`curl` without `-k` / `--insecure`).
 
@@ -456,7 +456,7 @@ Probe an approved internal dependency without editing scripts:
 
 ```bash
 sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
-  --probe-url https://homepage.iktstudio.com/
+  --probe-url https://verdaccio.iktstudio.com/
 ```
 
 **Infrastructure regression harness (keep small / non-application).**
@@ -526,10 +526,10 @@ Distinguish failure layers:
 
 | Symptom | Likely cause | Check |
 |---------|--------------|-------|
-| Name does not resolve | Missing `internalDnsHosts` / guest not using CI DNS | From guest: `host homepage.iktstudio.com`; on host: `virsh net-dumpxml ci-net` `<dns>` section; guest `resolv.conf` should list `192.168.67.1` |
+| Name does not resolve | Missing `internalDnsHosts` / guest not using CI DNS | From guest: `host verdaccio.iktstudio.com`; on host: `virsh net-dumpxml ci-net` `<dns>` section; guest `resolv.conf` should list `192.168.67.1` |
 | Resolves, TCP times out / rejected | Missing or wrong `hostAllowTcp` / `internalAllowTcp` | `sudo iptables -L ci-runner-in -n -v`; `sudo iptables -L ci-runner-fwd -n -v` |
-| TCP works, TLS fails | Cert / SNI / Traefik | From guest: `curl -v https://homepage.iktstudio.com/` (no `-k`); confirm Traefik cert covers the name |
-| TLS works, HTTP error | Homepage / Traefik routing | Inspect Traefik/Homepage logs; host-side `curl -fsS https://homepage.iktstudio.com/` |
+| TCP works, TLS fails | Cert / SNI / Traefik | From guest: `curl -v https://verdaccio.iktstudio.com/` (no `-k`); confirm Traefik cert covers the name |
+| TLS works, HTTP error | Verdaccio / Traefik routing | Inspect Traefik/Verdaccio logs; host-side `curl -fsS https://verdaccio.iktstudio.com/` |
 
 ```text
 DNS fails        → ci-net dnsmasq / internalDnsHosts

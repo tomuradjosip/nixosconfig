@@ -1,0 +1,19 @@
+# Example GitHub Actions workflow for the nixos-ci-runner-validation harness.
+# Copy into that repo (do not bake into the guest image). Triggers on workflow_dispatch.
+name: e2e-platform-smoke
+on:
+  workflow_dispatch:
+jobs:
+  combined:
+    runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Combined Podman + Playwright smoke
+        run: |
+          set -euo pipefail
+          # When this workflow lives in the validation harness, point at checked-in
+          # copies of fixtures/ci-runner-e2e from nixosconfig (or vendor them).
+          bash fixtures/ci-runner-e2e/combined-smoke.sh

@@ -1,19 +1,27 @@
 # Builds a disposable NixOS CI runner base qcow2 image.
 #
 # pkgs is the guest package set (nixpkgs-guest = current supported stable NixOS),
-# so the guest OS tracks a supported stable release. Only githubRunner is injected
-# from a newer nixpkgs (unstable): GitHub deprecates old runner versions and refuses
-# connections from them (a self-hosted runner must stay within 30 days of the latest
-# release), while the runner in the immutable /nix/store cannot self-update. Pinning a
-# current runner here + --disableupdate in the guest avoids both failure modes.
+# so the guest OS tracks a supported stable release. Narrow unstable injections:
+#   - githubRunner: GitHub deprecates old runner versions and refuses connections
+#     from them (a self-hosted runner must stay within 30 days of the latest
+#     release), while the runner in the immutable /nix/store cannot self-update.
+#     Pinning a current runner here + --disableupdate in the guest avoids both
+#     failure modes.
+#   - podmanCompose: nixos-26.05 ships podman-compose 1.5.0, which lacks
+#     `podman compose up -d --wait`. Unstable provides 1.6.0 without moving the
+#     whole guest OS off stable.
 {
   pkgs,
   lib,
   githubRunner,
+  podmanCompose,
 }:
 
 let
-  pkgsGuest = pkgs.extend (_final: _prev: { github-runner = githubRunner; });
+  pkgsGuest = pkgs.extend (_final: _prev: {
+    github-runner = githubRunner;
+    podman-compose = podmanCompose;
+  });
   eval = import (pkgs.path + "/nixos/lib/eval-config.nix") {
     system = pkgs.system;
     modules = [

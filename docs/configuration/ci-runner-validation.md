@@ -134,7 +134,8 @@ ci-runner-provisioner.service      inactive enabled   (oneshot, timer-driven)
 - **Runner updates are image-managed** (intentional; see reconciliation below): bump
   `nixpkgs-unstable`, rebuild the guest image, `install-base`, recycle. GitHub in-runner
   auto-update is intentionally disabled (`--disableupdate`); freshness is now **monitored**.
-- **No Docker/Podman in the guest.**
+- **Docker Engine is not in the guest.** Rootful Podman is guest-local (see platform docs);
+  no host Docker/Podman socket is exposed.
 - **Real boot-time reap trigger** is validated by command/logic and unit wiring; the exact
   systemd firing on a physical reboot was not exercised (host was not rebooted).
 - **Monitoring visibility of workflow runs** requires the GitHub App to also have
@@ -549,3 +550,78 @@ guest: ci-ephemeral-20260809192407-309  BASE_ID=7e3b6427bda13602
 
 **Verdict:** `https://verdaccio.iktstudio.com/` is an approved and validated internal
 dependency reachable from disposable CI runners without weakening general LAN isolation.
+
+## Guest Podman + Playwright platform extension (TASK-013 prep)
+
+**Date:** 2026-08-09 (implementation in working tree; live candidate evidence below or pending)
+
+Extends the **disposable guest only** so Shopforge browser E2E can run:
+
+```text
+Playwright Chromium → Node storefronts → Medusa → PostgreSQL + Redis (Podman Compose)
+```
+
+all inside one throwaway GitHub Actions guest. Trusted-host attack surface unchanged
+(no host container socket, no libvirt socket to guest, no App key in guest, RFC1918 deny
++ Verdaccio exception unchanged). Guest RAM/vCPU/`maxGuests` **not** changed (still
+4096 MiB / 2 vCPU / `maxGuests=3` / `desiredIdleCapacity=1`).
+
+### Declarative changes
+
+| Item | Value |
+|------|-------|
+| Podman | Enabled rootful in guest; Docker Engine forced off |
+| Docker compat / socket alias | Explicitly `false` / disabled |
+| Compose provider | `podman-compose` **1.6.0** from existing `nixpkgs-unstable` pin (`containers.conf` + `PODMAN_COMPOSE_PROVIDER`) |
+| Why unstable Compose | Guest stable only has 1.5.0 (no `up --wait`) |
+| Playwright | Consuming repo owns `@playwright/test` + Chromium revision; guest owns nix-ld Chromium libs + fonts |
+| Install model | `playwright install chromium` (not `--with-deps`) |
+| Sandbox | Option A: root runner may yield unsandboxed Chromium; no extra `--no-sandbox` flags added |
+| Fixtures | `fixtures/ci-runner-e2e/` |
+| Deterministic test | `tests/ci_runner_guest_test.py` |
+
+### Validation commands
+
+```bash
+python3 tests/ci_runner_pool_test.py
+python3 tests/ci_runner_network_test.py
+python3 tests/ci_runner_guest_test.py
+nix build /home/toka/nixosconfig#ci-runner-guest-image -L
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
+  --probe-url https://verdaccio.iktstudio.com/
+# Node regression (existing harness):
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
+  --github-repo tomuradjosip/nixos-ci-runner-validation --timeout 600
+# then: gh workflow run node-validation.yml -R tomuradjosip/nixos-ci-runner-validation
+# Podman / Playwright / combined: run fixtures/ci-runner-e2e/* inside a candidate job
+```
+
+### Live evidence status
+
+| Check | Status / evidence |
+|-------|-------------------|
+| Deterministic pool/network/guest tests | **PASS** — `ci_runner_pool_test.py` 31 OK; `ci_runner_network_test.py` 8 OK; `ci_runner_guest_test.py` 11 OK |
+| Candidate image build | **PASS** — `nix build .#ci-runner-guest-image` → `result/ci-runner-base.qcow2` |
+| Candidate isolation + Verdaccio probe | **PASS** — `ci-candidate-20260809235420-6028`; public HTTPS/DNS ok; Verdaccio HTTPS+TLS ok; LAN/SSH/:80/:3000 blocked; production spare undisturbed |
+| Node/pnpm harness regression | **PASS** — [run 31338091805](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31338091805) on candidate; setup-node 24 / npm / corepack pnpm / esbuild via nix-ld |
+| Podman postgres/redis smoke | **PASS** — `podman info`; `podman-compose` 1.6.0; `up -d --wait`; loopback pg_isready + redis PING; `down -v` |
+| Playwright Chromium smoke | **PASS** — `playwright install chromium` (no `--with-deps`); headless assertion `ci-runner-playwright-ok`; `DEBUG=pw:browser` |
+| Combined workload + cleanup | **PASS** — [run 31338724089](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31338724089) (~1m30s); candidate powered off; overlay/seed destroyed; production `ci-ephemeral-20260809222011-6654` undisturbed |
+| Fresh-guest isolation of Podman state | **PASS by construction** — writable overlay destroyed; next guest has empty container storage |
+
+### Resource measurements (combined job, 4 GiB / 2 vCPU guest)
+
+| Metric | Value |
+|--------|-------|
+| Root FS before smokes | 12G total, **3.7G used**, 7.4G avail (33%) |
+| Root FS after smokes | 12G total, **5.1G used**, 6.0G avail (46%) |
+| Playwright browser cache | **919M** (`~/.cache/ms-playwright`) |
+| Podman images after down | 2 images, **336.9MB** (reclaimable; containers 0) |
+| vCPU observed | `nproc` → **2** |
+| `free` | not on job PATH in this image build (procps added afterward for next candidate) |
+| Guest RAM/vCPU/`maxGuests` | **unchanged** — 4096 MiB / 2 / 3; no OOM observed on this fixture |
+
+Chromium launched under root with Playwright’s default `--no-sandbox` (Option A; not added by the runner image).
+
+Do **not** `install-base` / recycle production until a human reviews the uncommitted nixosconfig changes.
+First fixture attempt failed only because the smoke script called `python3` (absent by design); fixed to `podman exec` + Node.

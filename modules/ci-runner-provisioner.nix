@@ -36,13 +36,12 @@ in
     };
 
     systemd.services.ci-runner-provisioner = {
-      description = "Reconcile ephemeral CI runner warm-spare capacity";
+      description = "Reconcile ephemeral CI runner idle-pool capacity";
       # Order AFTER the boot reaper so that at real boot the fail-closed reap-boot
-      # runs first. Do NOT Want it: the reaper is Type=oneshot/RemainAfterExit=no,
-      # so a Wants= would re-trigger reap-boot on every timer activation and destroy
-      # the healthy warm spare each cycle. After= alone only orders at boot (when the
-      # reaper is already in the transaction via its own wantedBy) and is a no-op for
-      # periodic timer activations.
+      # runs first. Do NOT Want it: a Wants= would re-trigger reap-boot on every
+      # timer activation and destroy healthy guests. After= alone only orders at
+      # boot (when the reaper is already in the transaction via its own wantedBy)
+      # and is a no-op for periodic timer activations.
       after = [
         "ci-runner-reaper.service"
         "ci-runner-libvirt-network.service"
@@ -59,12 +58,18 @@ in
       };
     };
 
+    # Poll interval rationale (see docs/configuration/ci-runner.md):
+    # - GitHub App installation tokens last 1h; the CLI caches them (~55m).
+    # - Installation REST budget is typically 5,000 req/h; a 30s poll is ~120 list
+    #   calls/h plus occasional registration-token mints — well inside the budget.
+    # - Guest boot+register is on the order of 1–2 minutes, so sub-minute polling
+    #   notices busy→idle-deficit promptly without needing webhooks.
     systemd.timers.ci-runner-provisioner = {
-      description = "Periodically reconcile CI runner capacity";
+      description = "Periodically reconcile CI runner idle-pool capacity";
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        OnBootSec = "2m";
-        OnUnitActiveSec = "2m";
+        OnBootSec = "1m";
+        OnUnitActiveSec = "30s";
         Persistent = true;
         Unit = "ci-runner-provisioner.service";
       };

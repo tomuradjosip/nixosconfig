@@ -1,5 +1,5 @@
 # Host prerequisites for the ephemeral CI runner platform:
-# directories, packages, libvirt bridge allowlist, enable option.
+# Directories, packages, libvirt bridge allowlist, enable option.
 {
   config,
   pkgs,
@@ -63,7 +63,13 @@ in
     domainPrefix = lib.mkOption {
       type = lib.types.str;
       default = "ci-ephemeral-";
-      description = "libvirt domain name prefix; reaper only touches domains with this prefix.";
+      description = "libvirt domain name prefix for production runners; reaper/reconciler only manage this prefix.";
+    };
+
+    candidatePrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "ci-candidate-";
+      description = "libvirt domain name prefix for candidate-image validation VMs (never managed by the production pool).";
     };
 
     runnerLabel = lib.mkOption {
@@ -82,16 +88,27 @@ in
       '';
     };
 
-    desiredCleanCapacity = lib.mkOption {
+    desiredIdleCapacity = lib.mkOption {
       type = lib.types.ints.positive;
       default = 1;
-      description = "Desired number of clean idle ephemeral runners.";
+      description = ''
+        Desired number of healthy online idle ephemeral runners (busy=false).
+        When idle drops below this and total managed guests are below maxGuests,
+        the reconciler provisions replacements.
+      '';
     };
 
     maxGuests = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 1;
-      description = "Hard cap on concurrent CI guests.";
+      # Evidence-based default for a ~64 GiB host that already runs Home Assistant +
+      # a dense Podman homelab. Architectural ceiling is 10; raise only after
+      # confirming RAM/CPU headroom (see docs/configuration/ci-runner.md).
+      default = 3;
+      description = ''
+        Hard cap on concurrent managed production CI guests in ALL states
+        (provisioning, idle, busy, shutting down, uncertain). Architectural
+        ceiling is 10; the live default is deliberately lower and host-specific.
+      '';
     };
 
     guestMemoryMiB = lib.mkOption {
@@ -102,6 +119,12 @@ in
     guestVcpus = lib.mkOption {
       type = lib.types.ints.positive;
       default = 2;
+    };
+
+    provisioningGraceSec = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 300;
+      description = "Seconds a newly started guest may remain without an online GitHub runner before being treated as uncertain/stale.";
     };
 
     lanCidr = lib.mkOption {
@@ -120,7 +143,7 @@ in
       enable = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Enable GitHub App registration for warm-spare runners.";
+        description = "Enable GitHub App registration for the idle runner pool.";
       };
 
       owner = lib.mkOption {
@@ -181,13 +204,15 @@ in
           networkName
           bridgeName
           domainPrefix
+          candidatePrefix
           runnerLabel
           runnerVersion
-          desiredCleanCapacity
+          desiredIdleCapacity
           maxGuests
           guestMemoryMiB
           guestVcpus
           lanProbeTarget
+          provisioningGraceSec
           ;
         githubEnable = cfg.github.enable;
         githubOwner = cfg.github.owner;
@@ -201,8 +226,17 @@ in
     {
       assertions = [
         {
-          assertion = cfg.desiredCleanCapacity <= cfg.maxGuests;
-          message = "services.ciRunner.desiredCleanCapacity must be <= maxGuests";
+          assertion = cfg.desiredIdleCapacity <= cfg.maxGuests;
+          message = "services.ciRunner.desiredIdleCapacity must be <= maxGuests";
+        }
+        {
+          assertion = cfg.domainPrefix != cfg.candidatePrefix;
+          message = "services.ciRunner.domainPrefix and candidatePrefix must be distinct namespaces";
+        }
+        {
+          assertion = !(lib.hasPrefix cfg.domainPrefix cfg.candidatePrefix)
+            && !(lib.hasPrefix cfg.candidatePrefix cfg.domainPrefix);
+          message = "services.ciRunner domain/candidate prefixes must not be prefix-overlapping";
         }
         {
           assertion =
@@ -234,10 +268,10 @@ in
 
       # Prefer explicit mkdir over tmpfiles for /data/ci (parent /data may be user-owned).
       system.activationScripts.ci-runner-dirs = lib.stringAfter [ "users" ] ''
-        mkdir -p ${ciRoot}/base ${ciRoot}/overlays ${ciRoot}/seeds ${ciRoot}/state ${ciRoot}/logs
+        mkdir -p ${ciRoot}/base ${ciRoot}/overlays ${ciRoot}/seeds ${ciRoot}/state/guests ${ciRoot}/logs
         chmod 0750 ${ciRoot} || true
         chmod 0750 ${ciRoot}/base ${ciRoot}/logs || true
-        chmod 0700 ${ciRoot}/overlays ${ciRoot}/seeds ${ciRoot}/state || true
+        chmod 0700 ${ciRoot}/overlays ${ciRoot}/seeds ${ciRoot}/state ${ciRoot}/state/guests || true
         mkdir -p /persist/etc/secrets/ci-runner
         chmod 0700 /persist/etc/secrets/ci-runner || true
       '';

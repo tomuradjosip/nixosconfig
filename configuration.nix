@@ -30,11 +30,15 @@ in
     ./modules/ci-runner-provisioner.nix
   ];
 
-  # Ephemeral GitHub Actions runner platform (libvirt VMs). Keep github.enable
-  # false until App credentials exist and disposable-VM isolation is validated.
+  # Ephemeral GitHub Actions runner platform (libvirt VMs).
+  # desiredIdleCapacity=1 keeps one fresh idle spare; maxGuests is evidence-based
+  # for this host (62 GiB RAM, HA VM + dense Podman). Architectural ceiling is 10 —
+  # do not raise without re-checking MemAvailable and vCPU headroom.
   services.ciRunner = {
     enable = true;
     github.enable = true;
+    desiredIdleCapacity = 1;
+    maxGuests = 3;
   };
   # Enable flakes
   nix.settings.experimental-features = [

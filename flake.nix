@@ -64,12 +64,16 @@
           networkName = "ci-net";
           bridgeName = "virbr-ci";
           domainPrefix = "ci-ephemeral-";
+          candidatePrefix = "ci-candidate-";
           runnerLabel = "nixos-ephemeral-ci";
-          desiredCleanCapacity = 1;
-          maxGuests = 1;
+          desiredIdleCapacity = 1;
+          # Flake package default mirrors the architectural ceiling; the live NixOS
+          # module default is evidence-based (see services.ciRunner.maxGuests).
+          maxGuests = 10;
           guestMemoryMiB = 4096;
           guestVcpus = 2;
           lanProbeTarget = "192.168.10.7";
+          provisioningGraceSec = 300;
           githubEnable = false;
           githubOwner = "";
           githubRepo = "";

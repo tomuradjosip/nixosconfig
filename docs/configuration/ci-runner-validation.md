@@ -225,3 +225,124 @@ tools). NixOS remains the preferred guest; Ubuntu stays a documented fallback on
 
 `uncertain guest == contaminated guest == destroy`. Overlays are never reset and reused;
 each job gets a fresh copy-on-write overlay over the immutable base image.
+
+## Pool hardening + first-class candidate validation (2026-08-09)
+
+Hardening pass after the reconciliation update above. Architecture docs:
+**[CI runner platform — idle pool model](ci-runner.md#idle-pool-model)**. Deployed and
+exercised on the live host on **2026-08-09**.
+
+### Resource assessment (live host, 2026-08-09)
+
+| Fact | Value |
+|------|-------|
+| CPU | Intel i3-14100 (8 threads) |
+| RAM | 62 GiB; ~20 GiB MemAvailable at measurement; swap 2 GiB full |
+| Other VMs | Home Assistant 4 GiB / 2 vCPU |
+| CI guest sizing | 4 GiB / 2 vCPU |
+| Other load | Dense Podman homelab |
+| Theoretical ceiling | `maxGuests=10` → 10 × 4 GiB = 40 GiB guest RAM — **not safe** at current sizing |
+| Evidence-based live cap | `services.ciRunner.maxGuests = 3` |
+| Idle target | `services.ciRunner.desiredIdleCapacity = 1` |
+| Poll interval | `ci-runner-provisioner.timer` every **30s** (was 2m) |
+
+Do not raise `maxGuests` toward the architectural ceiling of 10 without re-checking
+MemAvailable / vCPU headroom (prefer right-sizing guest RAM first).
+
+### Unit tests (deterministic planner)
+
+| Item | Result |
+|------|--------|
+| Module | `packages/ci-runner-pool.py` |
+| Tests | `tests/ci_runner_pool_test.py` |
+| Count | **25** tests |
+| Run | `python3 tests/ci_runner_pool_test.py` → all OK |
+
+Coverage includes: idle deficit / `maxGuests` arithmetic, provisioning counts toward idle
+supply, fail-closed GitHub outage (retain running, no provision), stale/shutting_down
+destroy, saturated pool, and `ci-candidate-*` / foreign domain exclusion from the production
+pool.
+
+### `validate-candidate` (first-class CLI)
+
+Command (see [platform docs](ci-runner.md#validating-a-candidate-image)):
+
+```bash
+sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO]
+```
+
+| Check | Expected / evidence |
+|-------|---------------------|
+| Default dummy isolation | PASS markers: public HTTPS, DNS, LAN HTTP/ping blocked, host SSH unreachable, dummy workload complete; serial retained; production domain set unchanged |
+| Namespace | Guest name `ci-candidate-*`; production reaper/reconciler ignore it |
+| No production mutation | Does not call `install-base` / rewrite `current.qcow2` / destroy idle spare |
+| `--github-repo` auth | `gh api` registration token or `CI_RUNNER_REG_TOKEN` — **not** the production GitHub App |
+| Regression harness | [`tomuradjosip/nixos-ci-runner-validation`](https://github.com/tomuradjosip/nixos-ci-runner-validation) via `validate-candidate --github-repo …` + `gh workflow run node-validation.yml` |
+
+**Live evidence:**
+
+```
+# dummy (current base qcow2):
+PASS: candidate dummy validation
+production domains before/after: ci-ephemeral-20260809175555-18579 (unchanged)
+production spare undisturbed: yes
+candidate serial retained: /data/ci/logs/ci-candidate-20260809175639-4630.serial.log
+no leftover ci-candidate-* domains/overlays/seeds
+
+# GitHub harness (nixos-ci-runner-validation; CI_RUNNER_REG_TOKEN via user gh — not the App):
+PASS: candidate GitHub validation (runner exited 0)
+Job node completed with result: Succeeded
+production spare undisturbed: ci-ephemeral-20260809180325-12126
+candidate serial: /data/ci/logs/ci-candidate-20260809180358-13205.serial.log
+```
+
+### Pool scale / drain (live)
+
+Live config after deploy: `desiredIdleCapacity=1`, `maxGuests=3`. Production App remains
+scoped only to the existing registration repo (cannot add the validation harness via API —
+HTTP 403). Pool busy→replacement against that App-scoped repo was **not** exercised with a
+real application workflow (intentionally avoided). Instead:
+
+| Scenario | Result |
+|----------|--------|
+| Initial idle | `idle=1 total=1` after reconcile |
+| Forced multi-guest up to cap | `ci-runnerctl provision` ×2 → `total=3`; fourth attempt logs `max guests reached` |
+| Three online idle | Observed `idle=3 provisioning=0 total=3` (forced; normal policy keeps 1 idle) |
+| Concurrent reconcile | Two simultaneous `reconcile` under `flock` → both exit 0; still `total=1` when already satisfied |
+| GitHub API failure | Pem temporarily moved → `fail-closed`, `github_ok=false`, `provision=0`, all 3 running guests retained |
+| Drain back to one | Destroyed two extras → `idle=1 total=1` |
+| Busy→provision arithmetic (live domain + planner) | Snapshot of running spare with synthetic GitHub `busy=true` → `provision=1` via `ci-runner-pool plan` |
+| Overlay generation pin | Guest backing store = `/data/ci/base/ci-runner-base-….qcow2` (immutable path, not `current` symlink) |
+| Candidate exclusion | `ci-candidate-*` never counted in production pool during validate-candidate |
+
+**Final steady state after validation:**
+
+```
+capacity:
+  desired idle: 1
+  maximum:      3
+  total:        1
+  idle:         1
+  busy:         0
+  provisioning: 0
+  saturated:    false
+  github_ok:    true
+```
+
+Metrics include `ci_runner_idle`, `ci_runner_busy`, `ci_runner_provisioning`,
+`ci_runner_total`, `ci_runner_max_guests`, `ci_runner_desired_idle`, `ci_runner_saturated`,
+`ci_runner_github_ok` (plus legacy `ci_runner_clean_capacity` alias).
+
+> **Deviation / follow-up:** end-to-end busy→replacement with overlapping real jobs on the
+> App-scoped repo was skipped to avoid consuming-application CI. To exercise it later either
+> (a) add the validation harness repo to the GitHub App installation in the UI and temporarily
+> point `secrets.ciRunner.githubRepo` at it, or (b) dispatch a disposable workflow on the
+> App-scoped repo. Unit tests + the live `busy=true` → `provision=1` planner proof cover the
+> decision logic.
+
+### Out of scope (unchanged / explicit)
+
+- No workflow_job webhooks, ARC, Kubernetes, or queue-depth scaling
+- Gradual burst ramp-up only (30s poll)
+- Host remains `nixos-25.05`
+- Live `maxGuests=10` at 4 GiB/guest is **not** safe on this host

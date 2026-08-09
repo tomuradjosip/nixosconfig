@@ -562,8 +562,8 @@ the branch; **not** deployed to production `current.qcow2`.
 > useful historical evidence. The previous correction pass (now committed as `418a457`) is
 > recorded in
 > **[Final correction pass (2026-08-10)](#final-correction-pass-2026-08-10--historical-now-committed)**.
-> Current uncommitted cleanup acceptance is in
-> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10)**.
+> Current cleanup acceptance (validated while uncommitted, later committed as `3fbd854`) is in
+> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10--historical-now-committed)**.
 
 Extends the **disposable guest only** so Shopforge browser E2E can run:
 
@@ -634,8 +634,9 @@ then committed and pushed on `runner-upgrade` as `418a457` (“runner upgrade im
 
 > **Superseded for acceptance of the EXIT/`up --wait` cleanup edge case:** that pass’s
 > EXIT traps still gated teardown on `COMPOSE_STARTED=1`, which can miss partial
-> `up -d --wait` failures. Final acceptance for the current working-tree fix is recorded in
-> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10)**.
+> `up -d --wait` failures. Final acceptance for that fix (validated from the dirty working
+> tree, later committed as `3fbd854`) is recorded in
+> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10--historical-now-committed)**.
 
 ### Corrections applied (committed in `418a457`)
 
@@ -690,7 +691,7 @@ Harness note: fixtures were synced for that run onto temporary branch
 `final-correction-20260810` in `tomuradjosip/nixos-ci-runner-validation` (commit `94b1b1f`);
 not merged to harness `main`.
 
-## Final cleanup pass (2026-08-10)
+## Final cleanup pass (2026-08-10) — historical (now committed)
 
 **Purpose:** close the remaining Compose failure-path cleanup gap and re-validate the full
 guest platform from the exact final working tree before any production deployment.
@@ -704,20 +705,26 @@ left project containers/named volumes behind.
 pushed; tip of previous correction pass). Historical starting commit remains `0889c5d`.
 **Not** merged to `main`. Production still on `BASE_ID=7e3b6427bda13602`.
 
-**Working-tree state during this pass:** failure-path cleanup fix + docs + fixture test
-left **uncommitted** for human review. **No** commit/push of nixosconfig. **No**
-`install-base` / `recycle-idle`.
+**Working-tree state during validation:** failure-path cleanup fix + docs + fixture tests
+were developed and fully validated **while uncommitted** on top of `418a457`. During that
+validation cycle there was **no** nixosconfig commit/push and **no** `install-base` /
+`recycle-idle`.
 
-### Fixes applied (uncommitted on `runner-upgrade`)
+**Current repository state (after validation):** those cleanup corrections were subsequently
+committed and pushed to `runner-upgrade` as `3fbd854` (“runner upgrade improvements v2”).
+They remain **unmerged** to `main` and were **not** installed as the production runner base
+during this validation cycle.
+
+### Fixes applied (later committed as `3fbd854`)
 
 | Area | Change |
 |------|--------|
 | Cleanup model | `podman-smoke.sh` / `combined-smoke.sh` EXIT traps unconditionally attempt project-scoped `down -v` while `VOLUME_PROOF_DONE=0` (no `COMPOSE_STARTED` gate); cleanup errors ignored so they never mask the original failure; success path still runs explicit `down -v` + removal assertions then sets `VOLUME_PROOF_DONE=1` (trap skips — no duplicate teardown) |
 | Failure-path fixture | `fixtures/ci-runner-e2e/podman-failure-cleanup-smoke.sh` — intentional fail-after-up (exit 42) and controlled `up -d --wait` health failure; proves EXIT cleanup removes project containers + named volumes; no global prune; temp broken compose not left in the tree |
 | Tests | Guest fixture contracts assert the new trap model + failure-path script shape |
-| Docs | Distinguish historical `0889c5d`, committed `418a457`, and this uncommitted cleanup pass; clarify nothing merged/installed |
+| Docs | Distinguish historical `0889c5d`, committed `418a457`, and this cleanup pass (validated dirty, later `3fbd854`); clarify nothing merged/installed |
 
-### Final-candidate validation evidence (this working tree)
+### Final-candidate validation evidence (working tree → later `3fbd854`)
 
 | Check | Status / evidence |
 |-------|-------------------|
@@ -732,7 +739,7 @@ left **uncommitted** for human review. **No** commit/push of nixosconfig. **No**
 | Combined E2E | **PASS** — [run 31341399036](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31341399036) on harness `final-cleanup-20260810` (~2.5m including failure-path wait bound); candidate `ci-candidate-20260810011348-26308`; Job platform Succeeded; runner exited 0 → Power down; overlay/seed destroyed |
 | Named volume removal | **PASS** — after combined `down -v`: Containers **0**, Local Volumes **0**; images may remain (2×336.9MB) |
 | Resource measurements | **PASS** — see table below |
-| Production base | **unchanged** — `ci-runner-base-20260809191858.qcow2` (`BASE_ID=7e3b6427bda13602`); spare `ci-ephemeral-20260809222011-6654` undisturbed across all candidates; **no** `install-base` / `recycle-idle`; **no** nixosconfig commit/push |
+| Production base | **unchanged** — `ci-runner-base-20260809191858.qcow2` (`BASE_ID=7e3b6427bda13602`); spare `ci-ephemeral-20260809222011-6654` undisturbed across all candidates; **no** `install-base` / `recycle-idle` during validation (nixosconfig commit/push of this pass happened only afterward as `3fbd854`) |
 
 ### Fresh resource measurements (combined job, 4 GiB / 2 vCPU guest)
 
@@ -755,9 +762,12 @@ Chromium launched under root with Playwright’s default `--no-sandbox` (Option 
 ### Production deployment
 
 **Forbidden for this pass — confirmed not performed.** Production idle spare remains on the
-pre-extension base (`BASE_ID=7e3b6427bda13602`) until a human reviews the **uncommitted**
-nixosconfig cleanup corrections (and the already-pushed `418a457` branch tip) and explicitly
-authorizes `install-base` / `recycle-idle`. Nothing was merged to `main`.
+pre-extension base (`BASE_ID=7e3b6427bda13602`) / `ci-runner-base-20260809191858.qcow2`.
+The cleanup corrections were developed and fully validated while uncommitted on top of
+`418a457`. After validation they were committed and pushed to `runner-upgrade` as
+`3fbd854` (“runner upgrade improvements v2”). They remain unmerged to `main` and were not
+installed as the production runner base during this validation cycle. A human must still
+explicitly authorize `install-base` / `recycle-idle` before production rotation.
 
 Harness note: fixtures synced onto temporary branch `final-cleanup-20260810` in
 `tomuradjosip/nixos-ci-runner-validation` (tip includes failure-path + EXIT cleanup fixes);

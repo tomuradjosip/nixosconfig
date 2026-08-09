@@ -199,24 +199,72 @@ class TestGuestNoApplicationToolchainPin(unittest.TestCase):
             """
         )
         joined = " ".join(names).lower()
-        forbidden = [
-            "nodejs",
-            "node- ",
-            "pnpm",
-            "corepack",
-            "playwright",
-            "chromium",
-            "medusa",
-            "docker-compose",
-            "docker-",
-        ]
-        # Allow github-runner; forbid application/browser pins and Docker Engine tooling.
-        hits = [f for f in forbidden if f.strip() in joined]
         # nodejs / pnpm / playwright / chromium / medusa must not appear as packages.
         hard = [f for f in ("nodejs", "pnpm", "corepack", "playwright", "chromium", "medusa") if f in joined]
         self.assertEqual(hard, [], f"application toolchain packages leaked into guest: {hard}")
         # docker-compose binary must not be present (would steal compose provider precedence)
         self.assertNotIn("docker-compose", joined)
+
+
+class TestGuestRunnerPath(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.path = _eval_guest(
+            """
+            map (p: p.pname or p.name or "") cfg.systemd.services.ci-runner-lifecycle.path
+            """
+        )
+
+    def test_procps_on_runner_path(self):
+        # free/ps for guest resource measurements in CI jobs (added in 0889c5d).
+        joined = " ".join(self.path).lower()
+        self.assertTrue(
+            "procps" in joined,
+            f"expected procps on runner PATH for free/ps; got: {self.path}",
+        )
+
+    def test_podman_and_compose_on_runner_path(self):
+        joined = " ".join(self.path).lower()
+        self.assertIn("podman", joined)
+        self.assertIn("podman-compose", joined)
+
+
+class TestE2EFixtureContracts(unittest.TestCase):
+    """Static checks on fixtures/ci-runner-e2e (no live Podman required)."""
+
+    _FIXTURES = os.path.join(_ROOT, "fixtures", "ci-runner-e2e")
+
+    def _read(self, name: str) -> str:
+        with open(os.path.join(self._FIXTURES, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_compose_uses_named_postgres_volume(self):
+        text = self._read("compose.yaml")
+        self.assertIn("pgdata:/var/lib/postgresql/data", text)
+        self.assertIn("volumes:", text)
+        self.assertIn("pgdata:", text)
+
+    def test_podman_smoke_proves_volume_removal(self):
+        text = self._read("podman-smoke.sh")
+        self.assertIn("down -v", text)
+        self.assertIn("podman volume exists", text)
+        self.assertIn("EXPECTED_VOLUMES", text)
+        self.assertIn("trap cleanup_on_exit EXIT", text)
+
+    def test_playwright_smoke_pins_current_stable_default(self):
+        text = self._read("playwright-smoke.sh")
+        self.assertIn('PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.62.1}"', text)
+        self.assertIn('npm install --no-save "@playwright/test@${PLAYWRIGHT_VERSION}"', text)
+        self.assertIn("npx playwright install chromium", text)
+        # Install command must not use --with-deps (comment may mention the ban).
+        self.assertNotRegex(text, r"npx playwright install[^\n]*--with-deps")
+        self.assertNotIn("@playwright/test@1.55.0", text)
+
+    def test_combined_smoke_has_cleanup_trap(self):
+        text = self._read("combined-smoke.sh")
+        self.assertIn("trap cleanup_on_exit EXIT", text)
+        self.assertIn("VOLUME_PROOF_DONE", text)
+        self.assertIn("read_memory_peak", text)
 
 
 if __name__ == "__main__":

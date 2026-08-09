@@ -553,7 +553,15 @@ dependency reachable from disposable CI runners without weakening general LAN is
 
 ## Guest Podman + Playwright platform extension (TASK-013 prep)
 
-**Date:** 2026-08-09 (implementation in working tree; live candidate evidence below or pending)
+**Date:** 2026-08-09  
+**Branch/commit (historical):** `runner-upgrade` @ `0889c5d` (“runner upgrade”) — committed on
+the branch; **not** deployed to production `current.qcow2`.
+
+> **Superseded for acceptance:** the live candidate evidence in this section used an image
+> **without** the final `procps` PATH addition and with Playwright **1.55.0**. It remains
+> useful historical evidence. Final acceptance for the current working-tree corrections is
+> recorded in
+> **[Final correction pass (2026-08-10)](#final-correction-pass-2026-08-10)**.
 
 Extends the **disposable guest only** so Shopforge browser E2E can run:
 
@@ -579,24 +587,9 @@ all inside one throwaway GitHub Actions guest. Trusted-host attack surface uncha
 | Sandbox | Option A: root runner may yield unsandboxed Chromium; no extra `--no-sandbox` flags added |
 | Fixtures | `fixtures/ci-runner-e2e/` |
 | Deterministic test | `tests/ci_runner_guest_test.py` |
+| `procps` | On runner PATH (`free`/`ps`) — present in `0889c5d`, validated in the 2026-08-10 final pass |
 
-### Validation commands
-
-```bash
-python3 tests/ci_runner_pool_test.py
-python3 tests/ci_runner_network_test.py
-python3 tests/ci_runner_guest_test.py
-nix build /home/toka/nixosconfig#ci-runner-guest-image -L
-sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
-  --probe-url https://verdaccio.iktstudio.com/
-# Node regression (existing harness):
-sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
-  --github-repo tomuradjosip/nixos-ci-runner-validation --timeout 600
-# then: gh workflow run node-validation.yml -R tomuradjosip/nixos-ci-runner-validation
-# Podman / Playwright / combined: run fixtures/ci-runner-e2e/* inside a candidate job
-```
-
-### Live evidence status
+### Historical live evidence (2026-08-09; pre-procps / Playwright 1.55.0)
 
 | Check | Status / evidence |
 |-------|-------------------|
@@ -604,12 +597,12 @@ sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
 | Candidate image build | **PASS** — `nix build .#ci-runner-guest-image` → `result/ci-runner-base.qcow2` |
 | Candidate isolation + Verdaccio probe | **PASS** — `ci-candidate-20260809235420-6028`; public HTTPS/DNS ok; Verdaccio HTTPS+TLS ok; LAN/SSH/:80/:3000 blocked; production spare undisturbed |
 | Node/pnpm harness regression | **PASS** — [run 31338091805](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31338091805) on candidate; setup-node 24 / npm / corepack pnpm / esbuild via nix-ld |
-| Podman postgres/redis smoke | **PASS** — `podman info`; `podman-compose` 1.6.0; `up -d --wait`; loopback pg_isready + redis PING; `down -v` |
-| Playwright Chromium smoke | **PASS** — `playwright install chromium` (no `--with-deps`); headless assertion `ci-runner-playwright-ok`; `DEBUG=pw:browser` |
+| Podman postgres/redis smoke | **PASS** — `podman info`; `podman-compose` 1.6.0; `up -d --wait`; loopback pg_isready + redis PING; `down -v` (containers only; named-volume proof added later) |
+| Playwright Chromium smoke | **PASS** — `@playwright/test@1.55.0`; `playwright install chromium` (no `--with-deps`); headless assertion `ci-runner-playwright-ok`; `DEBUG=pw:browser` |
 | Combined workload + cleanup | **PASS** — [run 31338724089](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31338724089) (~1m30s); candidate powered off; overlay/seed destroyed; production `ci-ephemeral-20260809222011-6654` undisturbed |
 | Fresh-guest isolation of Podman state | **PASS by construction** — writable overlay destroyed; next guest has empty container storage |
 
-### Resource measurements (combined job, 4 GiB / 2 vCPU guest)
+### Historical resource measurements (combined job, 4 GiB / 2 vCPU guest)
 
 | Metric | Value |
 |--------|-------|
@@ -618,10 +611,72 @@ sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 \
 | Playwright browser cache | **919M** (`~/.cache/ms-playwright`) |
 | Podman images after down | 2 images, **336.9MB** (reclaimable; containers 0) |
 | vCPU observed | `nproc` → **2** |
-| `free` | not on job PATH in this image build (procps added afterward for next candidate) |
+| `free` | **not** on job PATH in that image build (`procps` was added afterward in `0889c5d`) |
 | Guest RAM/vCPU/`maxGuests` | **unchanged** — 4096 MiB / 2 / 3; no OOM observed on this fixture |
 
 Chromium launched under root with Playwright’s default `--no-sandbox` (Option A; not added by the runner image).
 
-Do **not** `install-base` / recycle production until a human reviews the uncommitted nixosconfig changes.
 First fixture attempt failed only because the smoke script called `python3` (absent by design); fixed to `podman exec` + Node.
+
+## Final correction pass (2026-08-10)
+
+**Purpose:** close validation gaps before any production `install-base`: current stable
+Playwright pin, named-volume `down -v` proof, EXIT cleanup traps, `procps`/resource
+measurements (including peak memory when available), and a **fresh** candidate built from
+the exact corrected working tree.
+
+**Repository state at start of pass:** branch `runner-upgrade` @ `0889c5d` (clean).  
+**Corrections:** left **uncommitted** for human review. **No** `install-base` / `recycle-idle`.
+
+### Corrections applied
+
+| Area | Change |
+|------|--------|
+| Playwright | Default `PLAYWRIGHT_VERSION=1.62.1` (npm registry `@playwright/test` latest as of 2026-08-10); overridable; still `playwright install chromium` without `--with-deps` |
+| Podman volumes | Explicit project-local named volumes `pgdata` + `redisdata`; smoke asserts they exist after `up` and are **gone** after `down -v` |
+| Cleanup traps | `podman-smoke.sh` / `combined-smoke.sh` EXIT traps tear down Compose if a mid-run assertion fails without masking the original failure; success path still runs the explicit volume-removal proof |
+| Tests | Guest tests assert `procps` on runner PATH + fixture contracts (Playwright pin, volume proof, traps) |
+| nix-ld libs | Unchanged unless a newer Chromium launch failure forces a narrow addition (recorded below) |
+
+### Final-candidate validation evidence
+
+| Check | Status / evidence |
+|-------|-------------------|
+| Deterministic pool/network/guest tests | **PASS** — pool 31 OK; network 8 OK; guest **17** OK (includes `procps` PATH + fixture contracts) |
+| Fresh image build (includes `procps`) | **PASS** — `nix build .#ci-runner-guest-image` → `/nix/store/pnwqd0gd8bhv859ks03pfy8c7d3h1219-ci-runner-guest-image` (`result/ci-runner-base.qcow2`, ~1.2G) |
+| Isolation + Verdaccio candidate | **PASS** — `ci-candidate-20260810002818-9717`; serial retained; public HTTPS/DNS ok; Verdaccio HTTPS+TLS + resolve `192.168.10.7`; LAN/SSH/:80/:3000 blocked; production spare undisturbed |
+| Node regression harness | **PASS** — [run 31339530300](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31339530300); candidate `ci-candidate-20260810002909-26252`; setup-node 24 / npm / corepack pnpm / esbuild; runner exited 0 → Power down |
+| Combined E2E (`e2e-platform-smoke.yml`) | **PASS** — [run 31339593508](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31339593508) on harness branch `final-correction-20260810` (~1m30s); candidate `ci-candidate-20260810003034-32516` |
+| Playwright version | **`@playwright/test@1.62.1`** (npm registry latest as of 2026-08-10); Chromium **151.0.7922.34** / revision **chromium-1234** / headless-shell-1234; `DEBUG=pw:browser` launch ok; assertion `ci-runner-playwright-ok` |
+| Named volume removal proof | **PASS** — after `up`: `ci-runner-e2e_pgdata` + `ci-runner-e2e_redisdata` present; after `down -v`: project containers gone, named volumes gone (`Local Volumes 0`), images may remain cached (2×336.9MB) |
+| nix-ld Chromium libs | **No addition required** for 1.62.1 / Chromium 151 — existing library set sufficient |
+| Resource / peak memory / `free` via `procps` | **PASS** — see table below; `free -m` available on PATH |
+| Production base | **unchanged** — still `ci-runner-base-20260809191858.qcow2` (`BASE_ID=7e3b6427bda13602`); spare `ci-ephemeral-20260809222011-6654` undisturbed across all three candidates; **not** deployed |
+
+### Final resource measurements (combined job, 4 GiB / 2 vCPU guest)
+
+| Metric | Value |
+|--------|-------|
+| Baseline `free -m` | total **3918** MiB; used **578**; available **3340** |
+| After browser `free -m` | used **833**; available **3085** |
+| After teardown `free -m` | used **716**; available **3201** |
+| `memory.peak` (job cgroup) | baseline **1014652928** (~968 MiB) → after **2552938496** (~2435 MiB / **~2.38 GiB**) |
+| `memory.peak` (`system.slice`) | baseline **1131048960** → after browser/teardown **2669285376** (~2545 MiB / **~2.48 GiB**) |
+| Root FS | before **3.7G/12G (33%)**; after **4.7G/12G (42–43%)** |
+| Playwright cache | **656M** (`~/.cache/ms-playwright`) |
+| Podman after `down -v` | Images **2 / 336.9MB** reclaimable; Containers **0**; Local Volumes **0** |
+| vCPU | `nproc` → **2** |
+| OOM | **none** observed |
+| Guest RAM/vCPU/`maxGuests` | **unchanged** — 4096 MiB / 2 / 3 |
+
+Chromium launched under root with Playwright’s default `--no-sandbox` (Option A; not added by the runner image). Headless launch succeeded without extra nix-ld packages.
+
+### Production deployment
+
+**Forbidden for this pass — confirmed not performed.** Production idle spare remains on the
+pre-extension base (`BASE_ID=7e3b6427bda13602`) until a human reviews the **uncommitted**
+nixosconfig corrections and explicitly runs `install-base` / `recycle-idle`.
+
+Harness note: fixtures were synced for this run onto temporary branch
+`final-correction-20260810` in `tomuradjosip/nixos-ci-runner-validation` (commit `94b1b1f`);
+not merged to harness `main`.

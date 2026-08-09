@@ -1,5 +1,6 @@
 # Example GitHub Actions workflow for the nixos-ci-runner-validation harness.
-# Copy into that repo (do not bake into the guest image). Triggers on workflow_dispatch.
+# The harness retains a live copy as .github/workflows/e2e-platform-smoke.yml
+# (workflow_dispatch only). Triggers on workflow_dispatch.
 name: e2e-platform-smoke
 on:
   workflow_dispatch:
@@ -11,9 +12,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Combined Podman + Playwright smoke
+      - name: Resource baseline
         run: |
           set -euo pipefail
-          # When this workflow lives in the validation harness, point at checked-in
-          # copies of fixtures/ci-runner-e2e from nixosconfig (or vendor them).
-          bash fixtures/ci-runner-e2e/combined-smoke.sh
+          echo "== free =="; free -m || true
+          echo "== df =="; df -h / /tmp || true
+          echo "== nproc =="; nproc || true
+          echo "== memory.peak ==";
+          cg="$(awk -F: 'NR==1{print $3}' /proc/self/cgroup 2>/dev/null || true)"
+          if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/memory.peak" ]]; then
+            cat "/sys/fs/cgroup${cg}/memory.peak"
+          else
+            echo unavailable
+          fi
+      - name: Combined Podman + Playwright smoke
+        env:
+          DEBUG: pw:browser
+          # Explicit current stable validated in nixosconfig fixtures (override to pin).
+          PLAYWRIGHT_VERSION: "1.62.1"
+        run: bash fixtures/ci-runner-e2e/combined-smoke.sh
+      - name: Resource after
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "== free =="; free -m || true
+          echo "== df =="; df -h / /tmp || true
+          echo "== playwright cache =="; du -sh "${HOME}/.cache/ms-playwright" 2>/dev/null || true
+          echo "== podman system df =="; podman system df 2>/dev/null || true
+          cg="$(awk -F: 'NR==1{print $3}' /proc/self/cgroup 2>/dev/null || true)"
+          if [[ -n "$cg" && -r "/sys/fs/cgroup${cg}/memory.peak" ]]; then
+            echo "== memory.peak =="; cat "/sys/fs/cgroup${cg}/memory.peak"
+          fi

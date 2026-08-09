@@ -402,11 +402,13 @@ Supported smoke:
 ```bash
 podman info
 podman compose version
-podman compose -f compose.yaml up -d --wait   # healthchecked postgres+redis on 127.0.0.1
-podman compose -f compose.yaml down -v
+podman compose -p ci-runner-e2e -f compose.yaml up -d --wait   # healthchecked postgres+redis on 127.0.0.1
+podman compose -p ci-runner-e2e -f compose.yaml down -v          # removes project containers + named volumes
 ```
 
-Fixtures: `fixtures/ci-runner-e2e/`.
+Fixtures (`fixtures/ci-runner-e2e/`) use project-local named volumes (`pgdata`, `redisdata`)
+and assert those volumes are gone after `down -v`. Smoke scripts install EXIT traps so
+Compose teardown still runs if an intermediate probe fails.
 
 ## Playwright Chromium support
 
@@ -425,6 +427,11 @@ Shopforge @playwright/test
   → Playwright-managed Chromium binary
   → nix-ld + guest shared libraries
 ```
+
+The platform smoke fixture defaults to an explicit current stable pin
+(`PLAYWRIGHT_VERSION=1.62.1` as of the 2026-08-10 correction pass; overridable) and runs
+`npx playwright install chromium` without `--with-deps`. Consuming apps may choose their
+own `@playwright/test` version; the guest only supplies the Chromium runtime library set.
 
 Do **not** use `playwright install --with-deps` as the NixOS dependency mechanism. Do **not**
 treat NixOS `chromium` as the primary browser executable unless the Playwright-managed path
@@ -545,7 +552,7 @@ is the retained harness (not a consuming app repo):
 |----------|---------|
 | `node-validation.yml` | Single-runner Node / nix-ld compatibility |
 | `pool-concurrency.yml` | Elastic pool: 3 overlapping lightweight jobs → scale / saturate / drain |
-| (proposed) `e2e-platform-smoke.yml` | Podman compose + Playwright Chromium combined smoke — see `fixtures/ci-runner-e2e/` |
+| `e2e-platform-smoke.yml` | Podman compose + Playwright Chromium combined smoke (`fixtures/ci-runner-e2e/`; `workflow_dispatch` only) |
 
 Candidate Node check:
 

@@ -1,11 +1,9 @@
-# Example GitHub Actions workflow for the nixos-ci-runner-validation harness.
-# The harness retains a live copy as .github/workflows/e2e-platform-smoke.yml
-# (workflow_dispatch only). Triggers on workflow_dispatch.
+# Platform smoke for nixos-ephemeral-ci candidate validation (workflow_dispatch only).
 name: e2e-platform-smoke
 on:
   workflow_dispatch:
 jobs:
-  combined:
+  platform:
     runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +23,18 @@ jobs:
           else
             echo unavailable
           fi
+      - name: Podman success-path smoke
+        run: bash fixtures/ci-runner-e2e/podman-smoke.sh
+      - name: Podman failure-path Compose cleanup
+        run: bash fixtures/ci-runner-e2e/podman-failure-cleanup-smoke.sh
+      - name: Playwright Chromium smoke
+        env:
+          DEBUG: pw:browser
+          PLAYWRIGHT_VERSION: "1.62.1"
+        run: bash fixtures/ci-runner-e2e/playwright-smoke.sh
       - name: Combined Podman + Playwright smoke
         env:
           DEBUG: pw:browser
-          # Explicit current stable validated in nixosconfig fixtures (override to pin).
           PLAYWRIGHT_VERSION: "1.62.1"
         run: bash fixtures/ci-runner-e2e/combined-smoke.sh
       - name: Resource after

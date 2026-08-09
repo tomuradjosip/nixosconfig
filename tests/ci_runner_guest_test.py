@@ -251,6 +251,19 @@ class TestE2EFixtureContracts(unittest.TestCase):
         self.assertIn("EXPECTED_VOLUMES", text)
         self.assertIn("trap cleanup_on_exit EXIT", text)
 
+    def test_podman_smoke_cleans_up_even_when_up_wait_fails(self):
+        """EXIT trap must not gate on COMPOSE_STARTED=1 after a successful up.
+
+        `up -d --wait` can create containers/volumes then fail (e.g. health timeout).
+        With set -e that exits before any post-up flag; cleanup must still run.
+        """
+        text = self._read("podman-smoke.sh")
+        self.assertIn("VOLUME_PROOF_DONE", text)
+        self.assertIn('if [[ "$VOLUME_PROOF_DONE" -eq 0 ]]; then', text)
+        # Must not gate EXIT cleanup on a post-up success flag (the prior bug).
+        self.assertNotRegex(text, r"\bCOMPOSE_STARTED\b")
+        self.assertIn("compose_down >/dev/null 2>&1 || true", text)
+
     def test_playwright_smoke_pins_current_stable_default(self):
         text = self._read("playwright-smoke.sh")
         self.assertIn('PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION:-1.62.1}"', text)
@@ -265,6 +278,18 @@ class TestE2EFixtureContracts(unittest.TestCase):
         self.assertIn("trap cleanup_on_exit EXIT", text)
         self.assertIn("VOLUME_PROOF_DONE", text)
         self.assertIn("read_memory_peak", text)
+        self.assertIn('if [[ "$VOLUME_PROOF_DONE" -eq 0 ]]; then', text)
+        self.assertNotRegex(text, r"\bCOMPOSE_STARTED\b")
+
+    def test_failure_cleanup_smoke_exercises_exit_paths(self):
+        text = self._read("podman-failure-cleanup-smoke.sh")
+        self.assertIn("intentional failure after compose up", text)
+        self.assertIn("up -d --wait", text)
+        self.assertIn("exit 42", text)
+        self.assertIn("healthcheck:", text)
+        self.assertIn('test: ["CMD-SHELL", "exit 1"]', text)
+        self.assertIn("assert_project_gone", text)
+        self.assertNotRegex(text, r"\bpodman\s+system\s+prune\b")
 
 
 if __name__ == "__main__":

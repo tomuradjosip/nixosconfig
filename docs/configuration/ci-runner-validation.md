@@ -559,9 +559,11 @@ the branch; **not** deployed to production `current.qcow2`.
 
 > **Superseded for acceptance:** the live candidate evidence in this section used an image
 > **without** the final `procps` PATH addition and with Playwright **1.55.0**. It remains
-> useful historical evidence. Final acceptance for the current working-tree corrections is
+> useful historical evidence. The previous correction pass (now committed as `418a457`) is
 > recorded in
-> **[Final correction pass (2026-08-10)](#final-correction-pass-2026-08-10)**.
+> **[Final correction pass (2026-08-10)](#final-correction-pass-2026-08-10--historical-now-committed)**.
+> Current uncommitted cleanup acceptance is in
+> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10)**.
 
 Extends the **disposable guest only** so Shopforge browser E2E can run:
 
@@ -618,27 +620,34 @@ Chromium launched under root with Playwright’s default `--no-sandbox` (Option 
 
 First fixture attempt failed only because the smoke script called `python3` (absent by design); fixed to `podman exec` + Node.
 
-## Final correction pass (2026-08-10)
+## Final correction pass (2026-08-10) — historical (now committed)
 
 **Purpose:** close validation gaps before any production `install-base`: current stable
 Playwright pin, named-volume `down -v` proof, EXIT cleanup traps, `procps`/resource
 measurements (including peak memory when available), and a **fresh** candidate built from
 the exact corrected working tree.
 
-**Repository state at start of pass:** branch `runner-upgrade` @ `0889c5d` (clean).  
-**Corrections:** left **uncommitted** for human review. **No** `install-base` / `recycle-idle`.
+**Repository state at start of that pass:** branch `runner-upgrade` @ `0889c5d` (clean).
+**How it was developed:** corrections were initially developed and validated **uncommitted**,
+then committed and pushed on `runner-upgrade` as `418a457` (“runner upgrade improvements”).
+**Not** merged to `main`. **No** `install-base` / `recycle-idle` (production base unchanged).
 
-### Corrections applied
+> **Superseded for acceptance of the EXIT/`up --wait` cleanup edge case:** that pass’s
+> EXIT traps still gated teardown on `COMPOSE_STARTED=1`, which can miss partial
+> `up -d --wait` failures. Final acceptance for the current working-tree fix is recorded in
+> **[Final cleanup pass (2026-08-10)](#final-cleanup-pass-2026-08-10)**.
+
+### Corrections applied (committed in `418a457`)
 
 | Area | Change |
 |------|--------|
 | Playwright | Default `PLAYWRIGHT_VERSION=1.62.1` (npm registry `@playwright/test` latest as of 2026-08-10); overridable; still `playwright install chromium` without `--with-deps` |
 | Podman volumes | Explicit project-local named volumes `pgdata` + `redisdata`; smoke asserts they exist after `up` and are **gone** after `down -v` |
-| Cleanup traps | `podman-smoke.sh` / `combined-smoke.sh` EXIT traps tear down Compose if a mid-run assertion fails without masking the original failure; success path still runs the explicit volume-removal proof |
+| Cleanup traps | `podman-smoke.sh` / `combined-smoke.sh` EXIT traps tear down Compose if a mid-run assertion fails without masking the original failure; success path still runs the explicit volume-removal proof (see later pass for `up --wait` partial-failure gap) |
 | Tests | Guest tests assert `procps` on runner PATH + fixture contracts (Playwright pin, volume proof, traps) |
 | nix-ld libs | Unchanged unless a newer Chromium launch failure forces a narrow addition (recorded below) |
 
-### Final-candidate validation evidence
+### Historical candidate validation evidence (working tree → later `418a457`)
 
 | Check | Status / evidence |
 |-------|-------------------|
@@ -653,7 +662,7 @@ the exact corrected working tree.
 | Resource / peak memory / `free` via `procps` | **PASS** — see table below; `free -m` available on PATH |
 | Production base | **unchanged** — still `ci-runner-base-20260809191858.qcow2` (`BASE_ID=7e3b6427bda13602`); spare `ci-ephemeral-20260809222011-6654` undisturbed across all three candidates; **not** deployed |
 
-### Final resource measurements (combined job, 4 GiB / 2 vCPU guest)
+### Historical resource measurements (combined job, 4 GiB / 2 vCPU guest)
 
 | Metric | Value |
 |--------|-------|
@@ -671,12 +680,85 @@ the exact corrected working tree.
 
 Chromium launched under root with Playwright’s default `--no-sandbox` (Option A; not added by the runner image). Headless launch succeeded without extra nix-ld packages.
 
+### Production deployment (that pass)
+
+**Forbidden — confirmed not performed.** Production idle spare remained on the
+pre-extension base (`BASE_ID=7e3b6427bda13602`). Corrections were later committed as
+`418a457` on `runner-upgrade` (still **not** merged to `main`, still **not** installed).
+
+Harness note: fixtures were synced for that run onto temporary branch
+`final-correction-20260810` in `tomuradjosip/nixos-ci-runner-validation` (commit `94b1b1f`);
+not merged to harness `main`.
+
+## Final cleanup pass (2026-08-10)
+
+**Purpose:** close the remaining Compose failure-path cleanup gap and re-validate the full
+guest platform from the exact final working tree before any production deployment.
+
+**Bug:** EXIT traps gated project `down -v` on `COMPOSE_STARTED=1`, set only **after**
+`podman compose up -d --wait` returned success. A partial `up` that then failed (e.g. health
+timeout) exited under `set -e` before the flag was set, so the trap skipped cleanup and
+left project containers/named volumes behind.
+
+**Repository state at start of this pass:** branch `runner-upgrade` @ `418a457` (clean,
+pushed; tip of previous correction pass). Historical starting commit remains `0889c5d`.
+**Not** merged to `main`. Production still on `BASE_ID=7e3b6427bda13602`.
+
+**Working-tree state during this pass:** failure-path cleanup fix + docs + fixture test
+left **uncommitted** for human review. **No** commit/push of nixosconfig. **No**
+`install-base` / `recycle-idle`.
+
+### Fixes applied (uncommitted on `runner-upgrade`)
+
+| Area | Change |
+|------|--------|
+| Cleanup model | `podman-smoke.sh` / `combined-smoke.sh` EXIT traps unconditionally attempt project-scoped `down -v` while `VOLUME_PROOF_DONE=0` (no `COMPOSE_STARTED` gate); cleanup errors ignored so they never mask the original failure; success path still runs explicit `down -v` + removal assertions then sets `VOLUME_PROOF_DONE=1` (trap skips — no duplicate teardown) |
+| Failure-path fixture | `fixtures/ci-runner-e2e/podman-failure-cleanup-smoke.sh` — intentional fail-after-up (exit 42) and controlled `up -d --wait` health failure; proves EXIT cleanup removes project containers + named volumes; no global prune; temp broken compose not left in the tree |
+| Tests | Guest fixture contracts assert the new trap model + failure-path script shape |
+| Docs | Distinguish historical `0889c5d`, committed `418a457`, and this uncommitted cleanup pass; clarify nothing merged/installed |
+
+### Final-candidate validation evidence (this working tree)
+
+| Check | Status / evidence |
+|-------|-------------------|
+| Deterministic pool/network/guest tests | **PASS** — pool **31** OK; network **8** OK; guest **19** OK (includes failure-path fixture contracts + `VOLUME_PROOF_DONE`-only EXIT cleanup) |
+| Failure-path cleanup fixture (static + live) | **PASS** — `podman-failure-cleanup-smoke.sh`; path1 intentional exit **42** after up → EXIT cleanup removed containers+volumes; path2 `up -d --wait` bounded by `timeout 60` (rc=**124**) after partial create → EXIT cleanup removed containers+volumes |
+| Fresh image build | **PASS** — `nix build .#ci-runner-guest-image` from dirty `runner-upgrade` tree → `/nix/store/pnwqd0gd8bhv859ks03pfy8c7d3h1219-ci-runner-guest-image` (`result/ci-runner-base.qcow2`, ~1.2G / 1.3 GiB closure). Same derivation as prior correction (guest module unchanged; fixture-only fixes) |
+| Isolation + Verdaccio candidate | **PASS** — `ci-candidate-20260810005654-10573`; public HTTPS/DNS ok; Verdaccio HTTPS+TLS ok; resolve `192.168.10.7`; LAN HTTP/ping blocked; host SSH/:80/:3000 blocked; production spare undisturbed |
+| Node regression harness | **PASS** — [run 31340711739](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31340711739) on harness `final-cleanup-20260810`; candidate `ci-candidate-20260810005726-7532`; Node **24.19.0** / npm / corepack pnpm / esbuild; runner exited 0 → Power down; overlay/seed destroyed |
+| Podman success-path smoke | **PASS** — podman **5.8.2**; podman-compose **1.6.0**; `up -d --wait`; volumes `ci-runner-e2e_pgdata` + `ci-runner-e2e_redisdata` present; loopback probes; explicit `down -v` removes containers + named volumes |
+| Podman failure-path cleanup | **PASS** — same job step; see failure-path fixture row; no global prune |
+| Playwright Chromium smoke | **PASS** — `@playwright/test@1.62.1` (npm latest still 1.62.1); Chromium **151.0.7922.34** / `chromium-1234` + `chromium_headless_shell-1234`; `playwright install chromium` without `--with-deps`; `DEBUG=pw:browser` launch; assertion `ci-runner-playwright-ok`; no missing `.so` |
+| Combined E2E | **PASS** — [run 31341399036](https://github.com/tomuradjosip/nixos-ci-runner-validation/actions/runs/31341399036) on harness `final-cleanup-20260810` (~2.5m including failure-path wait bound); candidate `ci-candidate-20260810011348-26308`; Job platform Succeeded; runner exited 0 → Power down; overlay/seed destroyed |
+| Named volume removal | **PASS** — after combined `down -v`: Containers **0**, Local Volumes **0**; images may remain (2×336.9MB) |
+| Resource measurements | **PASS** — see table below |
+| Production base | **unchanged** — `ci-runner-base-20260809191858.qcow2` (`BASE_ID=7e3b6427bda13602`); spare `ci-ephemeral-20260809222011-6654` undisturbed across all candidates; **no** `install-base` / `recycle-idle`; **no** nixosconfig commit/push |
+
+### Fresh resource measurements (combined job, 4 GiB / 2 vCPU guest)
+
+| Metric | Value |
+|--------|-------|
+| Baseline `free -m` | total **3918** MiB; used **535**; available **3382** |
+| After browser `free -m` | used **800**; available **3117** |
+| After teardown `free -m` | used **704**; available **3214** |
+| `memory.peak` (job cgroup) | baseline **1012912128** (~966 MiB) → after **2545758208** (~2428 MiB / **~2.37 GiB**) |
+| `memory.peak` (`system.slice`) | **2662830080** (~2539 MiB / **~2.48 GiB**) |
+| Root FS | before **3.7G/12G (33%)**; after **4.7G/12G (42–43%)** |
+| Playwright cache | **656M** (`~/.cache/ms-playwright`) |
+| Podman after `down -v` | Images **2 / 336.9MB** reclaimable; Containers **0**; Local Volumes **0** |
+| vCPU | `nproc` → **2** |
+| OOM | **none** observed |
+| Guest RAM/vCPU/`maxGuests` | **unchanged** — 4096 MiB / 2 / 3 |
+
+Chromium launched under root with Playwright’s default `--no-sandbox` (Option A). Headless launch succeeded without extra nix-ld packages. npm `@playwright/test` latest remained **1.62.1** (no pin bump).
+
 ### Production deployment
 
 **Forbidden for this pass — confirmed not performed.** Production idle spare remains on the
 pre-extension base (`BASE_ID=7e3b6427bda13602`) until a human reviews the **uncommitted**
-nixosconfig corrections and explicitly runs `install-base` / `recycle-idle`.
+nixosconfig cleanup corrections (and the already-pushed `418a457` branch tip) and explicitly
+authorizes `install-base` / `recycle-idle`. Nothing was merged to `main`.
 
-Harness note: fixtures were synced for this run onto temporary branch
-`final-correction-20260810` in `tomuradjosip/nixos-ci-runner-validation` (commit `94b1b1f`);
-not merged to harness `main`.
+Harness note: fixtures synced onto temporary branch `final-cleanup-20260810` in
+`tomuradjosip/nixos-ci-runner-validation` (tip includes failure-path + EXIT cleanup fixes);
+**not** merged to harness `main`.

@@ -8,7 +8,9 @@ cd "$ROOT"
 
 PROJECT=ci-runner-e2e
 COMPOSE=(podman compose -p "$PROJECT" -f compose.yaml)
-COMPOSE_STARTED=0
+# Set only after the explicit successful down -v + removal assertions complete.
+# EXIT cleanup runs whenever this is still 0 — including when `up -d --wait`
+# itself fails after partially creating project resources.
 VOLUME_PROOF_DONE=0
 
 EXPECTED_VOLUMES=(
@@ -75,7 +77,7 @@ assert_project_gone() {
 }
 
 cleanup_on_exit() {
-  if [[ "$COMPOSE_STARTED" -eq 1 && "$VOLUME_PROOF_DONE" -eq 0 ]]; then
+  if [[ "$VOLUME_PROOF_DONE" -eq 0 ]]; then
     compose_down >/dev/null 2>&1 || true
   fi
 }
@@ -89,7 +91,6 @@ bash "$ROOT/podman-smoke.sh"
 # Re-start compose for the combined browser path (podman-smoke tears down).
 echo "== compose up for combined path =="
 "${COMPOSE[@]}" up -d --wait
-COMPOSE_STARTED=1
 timeout 5 bash -c 'echo >/dev/tcp/127.0.0.1/5432'
 REDIS_CTR="$(podman ps --filter "label=com.docker.compose.project=${PROJECT}" --filter "label=com.docker.compose.service=redis" --format '{{.Names}}' | head -n1)"
 REDIS_CTR="${REDIS_CTR:-${PROJECT}_redis_1}"
@@ -102,8 +103,8 @@ resource_snapshot "after browser"
 
 echo "== compose down -v (combined explicit volume-removal proof) =="
 compose_down
-VOLUME_PROOF_DONE=1
 assert_project_gone
+VOLUME_PROOF_DONE=1
 echo "project containers and named volumes removed: ok"
 
 resource_snapshot "after teardown"

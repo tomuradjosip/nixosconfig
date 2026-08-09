@@ -8,7 +8,10 @@ cd "$ROOT"
 
 PROJECT=ci-runner-e2e
 COMPOSE=(podman compose -p "$PROJECT" -f compose.yaml)
-COMPOSE_STARTED=0
+# Set only after the explicit successful down -v + removal assertions complete.
+# EXIT cleanup runs whenever this is still 0 — including when `up -d --wait`
+# itself fails after partially creating containers/volumes (set -e would
+# otherwise exit before any post-up success flag could be set).
 VOLUME_PROOF_DONE=0
 
 # Project-scoped named volumes from compose.yaml (not global Podman state).
@@ -21,10 +24,11 @@ compose_down() {
   "${COMPOSE[@]}" down -v "$@"
 }
 
-# Best-effort teardown if an assertion fails before the explicit down -v proof.
-# Must not hide the original failure status (EXIT trap preserves it unless we exit).
+# Project-scoped teardown if we never completed the explicit volume-removal proof.
+# Covers: failed/partial `up -d --wait`, mid-run assertion failures, and interrupts.
+# Must not hide the original failure status (bash EXIT traps preserve $?; we never exit here).
 cleanup_on_exit() {
-  if [[ "$COMPOSE_STARTED" -eq 1 && "$VOLUME_PROOF_DONE" -eq 0 ]]; then
+  if [[ "$VOLUME_PROOF_DONE" -eq 0 ]]; then
     compose_down >/dev/null 2>&1 || true
   fi
 }
@@ -67,7 +71,6 @@ podman compose version
 
 echo "== compose up --wait =="
 "${COMPOSE[@]}" up -d --wait
-COMPOSE_STARTED=1
 
 echo "== project named volumes present =="
 for vol in "${EXPECTED_VOLUMES[@]}"; do
@@ -99,9 +102,8 @@ echo "postgres/redis loopback: ok"
 
 echo "== compose down -v (explicit volume-removal proof) =="
 compose_down
-VOLUME_PROOF_DONE=1
-
 assert_project_containers_gone
 assert_project_volumes_gone
+VOLUME_PROOF_DONE=1
 echo "project containers and named volumes removed: ok"
 echo "podman smoke: PASS"

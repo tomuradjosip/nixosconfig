@@ -91,7 +91,7 @@ services.ciRunner = {
 | `tests/ci_runner_pool_test.py` | Planner unit tests (31 cases) |
 | `tests/ci_runner_network_test.py` | Network render unit tests (DNS + INPUT/FORWARD) |
 | `tests/ci_runner_guest_test.py` | Guest capability invariants (Podman/Compose/nix-ld/SSH) |
-| `fixtures/ci-runner-e2e/` | Podman + Playwright smoke fixtures for candidate validation |
+| `fixtures/ci-runner-e2e/` | Podman + Playwright smoke fixtures for candidate validation (incl. failure-path Compose cleanup proof) |
 
 **systemd:**
 
@@ -407,8 +407,11 @@ podman compose -p ci-runner-e2e -f compose.yaml down -v          # removes proje
 ```
 
 Fixtures (`fixtures/ci-runner-e2e/`) use project-local named volumes (`pgdata`, `redisdata`)
-and assert those volumes are gone after `down -v`. Smoke scripts install EXIT traps so
-Compose teardown still runs if an intermediate probe fails.
+and assert those volumes are gone after `down -v`. Smoke scripts install EXIT traps that
+attempt project-scoped `down -v` whenever the explicit volume-removal proof has not
+completed — including when `up -d --wait` itself fails after partially creating resources.
+Cleanup errors are ignored so they never mask the original failure. See
+`podman-failure-cleanup-smoke.sh` for the controlled failure-path proof.
 
 ## Playwright Chromium support
 

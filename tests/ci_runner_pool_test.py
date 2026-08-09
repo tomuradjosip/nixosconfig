@@ -89,6 +89,71 @@ class TestComputeToProvision(unittest.TestCase):
                                                    github_ok=True), 2)
 
 
+class TestLiveHostCeiling(unittest.TestCase):
+    """Live host evidence-based ceiling: desired_idle=1, max_guests=3."""
+
+    def _plan(self, domains, runners, max_guests=3):
+        return pool.classify_domains(
+            cfg(desired_idle=1, max_guests=max_guests),
+            domains, runners, github_ok=True, now=2000)
+
+    def test_zero_busy_one_idle_provisions_none(self):
+        p = self._plan([dom(PREFIX + "a")], [gh(PREFIX + "a", busy=False)])
+        self.assertEqual(p["counts"]["busy"], 0)
+        self.assertEqual(p["counts"]["idle"], 1)
+        self.assertEqual(p["counts"]["total"], 1)
+        self.assertEqual(p["provision"], 0)
+        self.assertFalse(p["saturated"])
+
+    def test_one_busy_zero_idle_provisions_one(self):
+        p = self._plan([dom(PREFIX + "a")], [gh(PREFIX + "a", busy=True)])
+        self.assertEqual(p["counts"]["busy"], 1)
+        self.assertEqual(p["counts"]["idle"], 0)
+        self.assertEqual(p["counts"]["total"], 1)
+        self.assertEqual(p["provision"], 1)
+        self.assertFalse(p["saturated"])
+
+    def test_one_busy_one_idle_provisions_none(self):
+        p = self._plan(
+            [dom(PREFIX + "a"), dom(PREFIX + "b")],
+            [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=False)])
+        self.assertEqual(p["counts"]["busy"], 1)
+        self.assertEqual(p["counts"]["idle"], 1)
+        self.assertEqual(p["counts"]["total"], 2)
+        self.assertEqual(p["provision"], 0)
+
+    def test_two_busy_zero_idle_total_two_provisions_one(self):
+        p = self._plan(
+            [dom(PREFIX + "a"), dom(PREFIX + "b")],
+            [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=True)])
+        self.assertEqual(p["counts"]["busy"], 2)
+        self.assertEqual(p["counts"]["idle"], 0)
+        self.assertEqual(p["counts"]["total"], 2)
+        self.assertEqual(p["provision"], 1)
+
+    def test_two_busy_one_idle_total_three_provisions_none(self):
+        p = self._plan(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(PREFIX + "c")],
+            [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=True),
+             gh(PREFIX + "c", busy=False)])
+        self.assertEqual(p["counts"]["busy"], 2)
+        self.assertEqual(p["counts"]["idle"], 1)
+        self.assertEqual(p["counts"]["total"], 3)
+        self.assertEqual(p["provision"], 0)
+        self.assertFalse(p["saturated"])
+
+    def test_three_busy_saturated_provisions_none(self):
+        p = self._plan(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(PREFIX + "c")],
+            [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=True),
+             gh(PREFIX + "c", busy=True)])
+        self.assertEqual(p["counts"]["busy"], 3)
+        self.assertEqual(p["counts"]["idle"], 0)
+        self.assertEqual(p["counts"]["total"], 3)
+        self.assertEqual(p["provision"], 0)
+        self.assertTrue(p["saturated"])
+
+
 class TestClassify(unittest.TestCase):
     def test_initial_idle_spare(self):
         p = pool.classify_domains(

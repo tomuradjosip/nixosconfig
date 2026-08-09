@@ -355,30 +355,79 @@ get_installation_token() {
   printf '%s' "$token"
 }
 
+# Prefer the GitHub App for production repo API calls. When the App installation does
+# not include the target repo (common for the retained validation harness), fall back
+# to the invoking user's authenticated `gh` — same auth path as validate-candidate.
+# Fail-closed behaviour is unchanged: if neither App nor gh can reach the API, callers
+# treat GitHub as unavailable.
+gh_api_user() {
+  # Prefer explicit override, then sudo invoker, then a local user with gh auth
+  # (systemd oneshots have neither SUDO_USER nor root gh credentials).
+  local user="${CI_RUNNER_GH_USER:-${SUDO_USER:-}}"
+  if [[ -z "$user" ]]; then
+    local d
+    for d in /home/*; do
+      [[ -f "$d/.config/gh/hosts.yml" ]] || continue
+      user=$(basename "$d")
+      break
+    done
+  fi
+  printf '%s' "$user"
+}
+
+gh_api_as_invoker() {
+  # Usage: gh_api_as_invoker <gh api args...>
+  # Use runuser (util-linux, on our PATH) rather than sudo: systemd oneshots do not
+  # include sudo in PATH, so `sudo -u … gh` silently fails and root's unauthenticated
+  # `gh` then makes GitHub look unavailable (fail-closed, no provisioning).
+  local user
+  user=$(gh_api_user)
+  if [[ -n "$user" ]] && command -v gh >/dev/null 2>&1; then
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$user" -- gh api "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo -u "$user" gh api "$@"
+    else
+      return 1
+    fi
+  elif command -v gh >/dev/null 2>&1; then
+    gh api "$@"
+  else
+    return 1
+  fi
+}
+
 fetch_registration_token() {
   local owner="$1" repo="$2"
-  if [[ ! -f "$GH_KEY" ]]; then
-    log "missing GitHub App private key at $GH_KEY"
-    return 1
-  fi
   local inst_token reg_json token
-  inst_token=$(get_installation_token) || {
-    log "failed to mint installation token (check appId/installationId/key)"
+  if [[ -f "$GH_KEY" ]]; then
+    if inst_token=$(get_installation_token 2>/dev/null); then
+      if reg_json=$(curl -fsS -X POST \
+        -H "Authorization: Bearer $inst_token" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${owner}/${repo}/actions/runners/registration-token" 2>/dev/null); then
+        token=$(echo "$reg_json" | jq -r '.token // empty')
+        if [[ -n "$token" ]]; then
+          echo "$token"
+          return 0
+        fi
+      fi
+      log "App registration-token failed for ${owner}/${repo}; trying gh fallback"
+    else
+      log "failed to mint installation token; trying gh fallback"
+    fi
+  else
+    log "missing GitHub App private key at $GH_KEY; trying gh fallback"
+  fi
+  token=$(gh_api_as_invoker -X POST "/repos/${owner}/${repo}/actions/runners/registration-token" -q .token) || {
+    log "registration-token failed via App and gh (App needs repo access, or authenticate gh as admin)"
     return 1
   }
-  reg_json=$(curl -fsS -X POST \
-    -H "Authorization: Bearer $inst_token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${owner}/${repo}/actions/runners/registration-token") || {
-    log "registration-token request failed (App needs Administration: read/write on the repo)"
-    return 1
-  }
-  token=$(echo "$reg_json" | jq -r '.token // empty')
-  if [[ -z "$token" ]]; then
+  [[ -n "$token" ]] || {
     log "registration-token response had no .token"
     return 1
-  fi
+  }
   echo "$token"
 }
 
@@ -386,14 +435,22 @@ list_github_runners_json() {
   # Prints the .runners array JSON, or fails. Uses official
   # GET /repos/{owner}/{repo}/actions/runners (status + busy fields).
   local owner="$1" repo="$2"
-  local inst_token
-  inst_token=$(get_installation_token) || return 1
-  curl -fsS \
-    -H "Authorization: Bearer $inst_token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${owner}/${repo}/actions/runners" \
-    | jq -c '.runners // []'
+  local inst_token body
+  if [[ -f "$GH_KEY" ]]; then
+    if inst_token=$(get_installation_token 2>/dev/null); then
+      if body=$(curl -fsS \
+        -H "Authorization: Bearer $inst_token" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${owner}/${repo}/actions/runners" 2>/dev/null); then
+        echo "$body" | jq -c '.runners // []'
+        return 0
+      fi
+      log "App runners list failed for ${owner}/${repo}; trying gh fallback"
+    fi
+  fi
+  body=$(gh_api_as_invoker "/repos/${owner}/${repo}/actions/runners") || return 1
+  echo "$body" | jq -c '.runners // []'
 }
 
 github_check() {
@@ -414,34 +471,26 @@ github_check() {
   perms=$(stat -c '%a' "$GH_KEY" 2>/dev/null || echo "?")
   echo "keyPerms   : $perms (expect 0400/0600, root-owned)"
   local inst_token
-  inst_token=$(get_installation_token) || {
-    echo "FAIL: could not mint installation token (bad appId/installationId/key, or App not installed on repo)"
+  if inst_token=$(get_installation_token 2>/dev/null); then
+    [[ -n "$inst_token" ]] || { echo "FAIL: empty installation token"; return 1; }
+    echo "OK  : minted installation access token"
+  else
+    echo "WARN: App installation token failed (App may not include $GH_OWNER/$GH_REPO); will try gh fallback for runner list/reg-token"
+  fi
+  local runners n token
+  # Prefer unified list helper (App then gh fallback) so harness targeting works.
+  runners=$(list_github_runners_json "$GH_OWNER" "$GH_REPO") || {
+    echo "FAIL: cannot list repo runners via App or gh (App needs repo access, or authenticate gh as admin)"
     return 1
   }
-  [[ -n "$inst_token" ]] || { echo "FAIL: empty installation token"; return 1; }
-  echo "OK  : minted installation access token"
-  local runners n
-  runners=$(curl -fsS \
-    -H "Authorization: Bearer $inst_token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/actions/runners") || {
-    echo "FAIL: cannot list repo runners (App needs Administration: read/write)"
-    return 1
-  }
-  n=$(echo "$runners" | jq -r '.total_count // 0')
+  n=$(echo "$runners" | jq -r 'length')
   echo "OK  : listed repo self-hosted runners (currently registered: $n)"
-  echo "$runners" | jq -r '.runners[]? | "  - \(.name) status=\(.status) busy=\(.busy)"'
-  local reg
-  reg=$(curl -fsS -X POST \
-    -H "Authorization: Bearer $inst_token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/$GH_OWNER/$GH_REPO/actions/runners/registration-token") || {
-    echo "FAIL: cannot mint registration-token (App needs Administration: read/write)"
+  echo "$runners" | jq -r '.[]? | "  - \(.name) status=\(.status) busy=\(.busy)"'
+  token=$(fetch_registration_token "$GH_OWNER" "$GH_REPO") || {
+    echo "FAIL: cannot mint registration-token via App or gh"
     return 1
   }
-  if [[ -n "$(echo "$reg" | jq -r '.token // empty')" ]]; then
+  if [[ -n "$token" ]]; then
     echo "OK  : minted a registration token (discarded; NO runner was registered)"
   else
     echo "FAIL: registration-token response had no token"
@@ -451,29 +500,29 @@ github_check() {
 }
 
 delete_stale_github_runners() {
-  if [[ "$GH_ENABLE" != "1" ]] || [[ ! -f "$GH_KEY" ]]; then
+  if [[ "$GH_ENABLE" != "1" ]]; then
     return 0
   fi
-  local inst_token runners
-  inst_token=$(get_installation_token || true)
-  [[ -n "${inst_token:-}" ]] || return 0
-  runners=$(curl -fsS \
-    -H "Authorization: Bearer $inst_token" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/actions/runners" || true)
+  local runners
+  runners=$(list_github_runners_json "$GH_OWNER" "$GH_REPO" 2>/dev/null) || return 0
   [[ -n "$runners" ]] || return 0
   echo "$runners" | jq -r --arg p "$PREFIX" \
-    '.runners[]? | select(.name|startswith($p)) | "\(.id) \(.name) \(.status)"' \
+    '.[]? | select(.name|startswith($p)) | "\(.id) \(.name) \(.status)"' \
     | while read -r id name status; do
         if [[ "$status" == "offline" ]]; then
           log "deleting stale GitHub runner $name ($id)"
-          curl -fsS -X DELETE \
-            -H "Authorization: Bearer $inst_token" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/actions/runners/$id" \
-            >/dev/null || true
+          # Prefer App DELETE when installed on the repo; else gh (harness targeting).
+          local inst_token
+          if inst_token=$(get_installation_token 2>/dev/null); then
+            curl -fsS -X DELETE \
+              -H "Authorization: Bearer $inst_token" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/actions/runners/$id" \
+              >/dev/null 2>&1 && continue
+          fi
+          gh_api_as_invoker -X DELETE "/repos/${GH_OWNER}/${GH_REPO}/actions/runners/$id" \
+            >/dev/null 2>&1 || true
         fi
       done
 }

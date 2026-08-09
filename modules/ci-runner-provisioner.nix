@@ -23,6 +23,12 @@ in
         "ci-runner-libvirt-network.service"
       ];
       wantedBy = [ "multi-user.target" ];
+      # Do not restart/stop on unit-file changes during nixos-rebuild switch.
+      # RemainAfterExit alone is insufficient: when ExecStart's store path changes
+      # (package rebuild), systemd would otherwise stop+start this oneshot and
+      # re-run fail-closed reap-boot, destroying the healthy warm spare.
+      restartIfChanged = false;
+      stopIfChanged = false;
       serviceConfig = {
         Type = "oneshot";
         # RemainAfterExit keeps this "active (exited)" after its single boot run so

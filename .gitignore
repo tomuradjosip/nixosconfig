@@ -4,5 +4,6 @@ scratchpad
 # nix build symlink
 result
 
-# nix build symlink
-result
+# Python bytecode from local unit tests
+**/__pycache__/
+*.py[cod]

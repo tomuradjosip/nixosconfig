@@ -25,8 +25,17 @@ in
     ./modules/samba.nix
     ./modules/mikrotik-backup.nix
     ./modules/monitoring.nix
+    ./modules/ci-runner-host.nix
+    ./modules/ci-runner-network.nix
+    ./modules/ci-runner-provisioner.nix
   ];
 
+  # Ephemeral GitHub Actions runner platform (libvirt VMs). Keep github.enable
+  # false until App credentials exist and disposable-VM isolation is validated.
+  services.ciRunner = {
+    enable = true;
+    github.enable = true;
+  };
   # Enable flakes
   nix.settings.experimental-features = [
     "nix-command"

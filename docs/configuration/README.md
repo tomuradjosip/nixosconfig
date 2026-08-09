@@ -40,6 +40,9 @@ Core system configuration is spread across a few key files. Boot-related setting
 ### Home Assistant VM (libvirt)
 To import Home Assistant OS on the LAN bridge **`br0`**, use the commands in **[Home Assistant VM](home-assistant-vm.md)**.
 
+### Ephemeral CI runners (libvirt)
+Disposable GitHub Actions runners on an isolated NAT network: **[CI runner platform](ci-runner.md)**.
+
 ## Configuration Workflow
 
 1. **Edit** relevant module files

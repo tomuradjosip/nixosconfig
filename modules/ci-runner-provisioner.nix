@@ -93,5 +93,29 @@ in
         Unit = "ci-runner-reaper-soft.service";
       };
     };
+
+    # Observe-only runner freshness monitor: compares the baked runner version against the
+    # latest published GitHub release and exposes node_exporter textfile metrics. It never
+    # mutates flake.lock or deploys — the Git repository stays authoritative over inputs.
+    systemd.services.ci-runner-freshness = {
+      description = "Check ephemeral CI runner version against latest GitHub release";
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cfg.package}/bin/ci-runnerctl freshness";
+      };
+    };
+
+    systemd.timers.ci-runner-freshness = {
+      description = "Periodically check CI runner version freshness";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "10m";
+        OnUnitActiveSec = "12h";
+        Persistent = true;
+        Unit = "ci-runner-freshness.service";
+      };
+    };
   };
 }

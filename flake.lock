@@ -47,6 +47,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-guest": {
+      "locked": {
+        "lastModified": 1786089803,
+        "narHash": "sha256-ZuvZfVW2tB5tXYEcpcfhVXB3N4OhdZLOqOviy4OD4b4=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "ee48b147c18c7de1e6ec97dc74792be42724bed1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "nixpkgs-unstable": {
       "locked": {
         "lastModified": 1786106723,
@@ -68,6 +84,7 @@
         "aliases": "aliases",
         "impermanence": "impermanence",
         "nixpkgs": "nixpkgs",
+        "nixpkgs-guest": "nixpkgs-guest",
         "nixpkgs-unstable": "nixpkgs-unstable"
       }
     }

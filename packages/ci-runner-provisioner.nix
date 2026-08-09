@@ -6,6 +6,7 @@
   bridgeName,
   domainPrefix,
   runnerLabel,
+  runnerVersion ? "",
   desiredCleanCapacity,
   maxGuests,
   guestMemoryMiB,
@@ -64,6 +65,7 @@ let
     BRIDGE=${lib.escapeShellArg bridgeName}
     PREFIX=${lib.escapeShellArg domainPrefix}
     LABEL=${lib.escapeShellArg runnerLabel}
+    RUNNER_VERSION=${lib.escapeShellArg runnerVersion}
     DESIRED=${toString desiredCleanCapacity}
     MAX_GUESTS=${toString maxGuests}
     MEM=${toString guestMemoryMiB}
@@ -81,6 +83,7 @@ let
     LOCK_FILE="$STATE_DIR/provision.lock"
     STATUS_FILE="$STATE_DIR/status.env"
     METRICS_FILE="$TEXTFILE_DIR/ci_runner.prom"
+    FRESHNESS_FILE="$TEXTFILE_DIR/ci_runner_freshness.prom"
 
     export PATH=${
       lib.makeBinPath [
@@ -204,6 +207,79 @@ let
       local cur=0
       [[ -f "$file" ]] && cur=$(cat "$file")
       echo $((cur + 1)) >"$file"
+    }
+
+    # Runner freshness monitor. Compares the runner version baked into the current guest
+    # image against the latest published GitHub Actions runner release. GitHub requires a
+    # self-hosted runner with automatic updates disabled (--disableupdate) to be updated
+    # within 30 days of a new release, or it stops queuing jobs. This ONLY observes and
+    # exposes metrics — it never edits flake.lock, rebuilds, or deploys. Uses the public,
+    # unauthenticated releases API (no GitHub credentials required).
+    check_freshness() {
+      mkdir -p "$TEXTFILE_DIR"
+      local baked="$RUNNER_VERSION"
+      local now latest published latest_ts ok update deadline_ts json
+      now=$(date +%s)
+      latest=""
+      published=""
+      latest_ts=0
+      ok=0
+      update=0
+      deadline_ts=0
+      if json=$(curl -fsS --max-time 20 \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/actions/runner/releases/latest" 2>/dev/null); then
+        latest=$(printf '%s' "$json" | jq -r '.tag_name // empty' | sed 's/^v//')
+        published=$(printf '%s' "$json" | jq -r '.published_at // empty')
+        if [[ -n "$latest" ]]; then
+          ok=1
+          if [[ -n "$published" ]]; then
+            latest_ts=$(date -d "$published" +%s 2>/dev/null || echo 0)
+          fi
+          if [[ -n "$baked" && "$baked" != "$latest" ]]; then
+            update=1
+            # The 30-day compatibility window starts at the latest release publication.
+            if [[ "$latest_ts" -gt 0 ]]; then
+              deadline_ts=$((latest_ts + 30 * 86400))
+            fi
+          fi
+        fi
+      fi
+      local tmp="$FRESHNESS_FILE.$$.tmp"
+      {
+        echo '# HELP ci_runner_baked_version_info Runner version baked into the current guest image (version is a label).'
+        echo '# TYPE ci_runner_baked_version_info gauge'
+        echo "ci_runner_baked_version_info{version=\"''${baked:-unknown}\"} 1"
+        echo '# HELP ci_runner_latest_version_info Latest published GitHub Actions runner release (version is a label).'
+        echo '# TYPE ci_runner_latest_version_info gauge'
+        echo "ci_runner_latest_version_info{version=\"''${latest:-unknown}\"} 1"
+        echo '# HELP ci_runner_update_available 1 if the baked runner is behind the latest published release.'
+        echo '# TYPE ci_runner_update_available gauge'
+        echo "ci_runner_update_available $update"
+        echo '# HELP ci_runner_latest_release_timestamp Unix time the latest runner release was published.'
+        echo '# TYPE ci_runner_latest_release_timestamp gauge'
+        echo "ci_runner_latest_release_timestamp $latest_ts"
+        echo '# HELP ci_runner_update_deadline_timestamp Unix time GitHub stops queuing jobs to an un-updated runner (latest release + 30d); 0 when up to date or unknown.'
+        echo '# TYPE ci_runner_update_deadline_timestamp gauge'
+        echo "ci_runner_update_deadline_timestamp $deadline_ts"
+        echo '# HELP ci_runner_freshness_check_timestamp Unix time of the last freshness check.'
+        echo '# TYPE ci_runner_freshness_check_timestamp gauge'
+        echo "ci_runner_freshness_check_timestamp $now"
+        echo '# HELP ci_runner_freshness_check_success 1 if the last freshness check reached the GitHub releases API.'
+        echo '# TYPE ci_runner_freshness_check_success gauge'
+        echo "ci_runner_freshness_check_success $ok"
+      } >"$tmp"
+      mv -f "$tmp" "$FRESHNESS_FILE"
+      echo "baked runner : ''${baked:-unknown}"
+      echo "latest runner: ''${latest:-unknown} (check_success=$ok)"
+      if [[ "$update" == "1" ]]; then
+        local human="unknown"
+        [[ "$deadline_ts" -gt 0 ]] && human=$(date -d "@$deadline_ts" -Is 2>/dev/null || echo unknown)
+        echo "UPDATE AVAILABLE: bump nixpkgs-unstable, rebuild + validate + install-base. Deadline ~$human"
+      else
+        echo "up to date (or latest unknown; nothing to do)"
+      fi
     }
 
     require_base() {
@@ -680,6 +756,10 @@ let
         write_metrics
         cat "$METRICS_FILE"
         ;;
+      freshness)
+        # Observe-only: compare baked runner vs latest GitHub release, write metrics.
+        check_freshness
+        ;;
       *)
         cat <<EOF
 usage: ci-runnerctl <command>
@@ -695,6 +775,7 @@ usage: ci-runnerctl <command>
   destroy <domain>
   destroy-all
   metrics
+  freshness
 EOF
         exit 2
         ;;

@@ -216,6 +216,17 @@ in
     pkg-config
   ];
 
+  # Generic ability to execute conventional, dynamically linked Linux binaries that
+  # GitHub Actions tooling downloads at job time (e.g. the Node runtime fetched by
+  # actions/setup-node, and prebuilt native npm packages). Precompiled binaries expect
+  # /lib64/ld-linux-x86-64.so.2, which does not exist on NixOS; nix-ld installs a shim
+  # there and supplies a generic library search path. NixOS owns this compatibility
+  # layer; consuming repositories remain authoritative for their toolchain *versions*.
+  # The default library set (zlib, zstd, stdenv.cc.cc/libstdc++, openssl, ...) is the
+  # minimum general-purpose set — deliberately not expanded until a real validation
+  # failure demonstrates a specific missing library.
+  programs.nix-ld.enable = true;
+
   virtualisation.docker.enable = lib.mkForce false;
   virtualisation.podman.enable = lib.mkForce false;
   services.openssh.enable = false;
@@ -233,12 +244,25 @@ in
       "run-ci\\x2dseed.mount"
     ];
     wants = [ "network-online.target" ];
+    # programs.nix-ld only exports NIX_LD via environment.sessionVariables, which is not
+    # applied to systemd services. Set it explicitly here so the runner process — and the
+    # GitHub Actions job steps it spawns — can execute downloaded dynamically linked
+    # binaries (e.g. the Node runtime from actions/setup-node) via the nix-ld shim.
+    environment = {
+      NIX_LD = "/run/current-system/sw/share/nix-ld/lib/ld.so";
+      NIX_LD_LIBRARY_PATH = "/run/current-system/sw/share/nix-ld/lib";
+    };
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       StandardOutput = "journal+console";
       StandardError = "journal+console";
     };
+    # This PATH is inherited by the runner process and therefore by every GitHub Actions
+    # job step. It must resemble a conventional Linux CI environment: the runner extracts
+    # downloaded actions with `tar`/`gzip` (checkout, setup-node, ...), and ordinary shell
+    # `run:` steps expect the standard text/archive utilities. These are generic tools,
+    # not application toolchains (which repositories install themselves via setup-node etc.).
     path = with pkgs; [
       coreutils
       bash
@@ -250,9 +274,19 @@ in
       iputils
       cacert
       util-linux
+      gnutar
+      gzip
+      xz
+      unzip
+      gnugrep
+      gnused
+      gawk
+      findutils
     ];
     serviceConfig.ExecStart = "${lifecycleScript}";
   };
 
-  system.stateVersion = "25.05";
+  # Disposable guest built from nixpkgs-guest (current supported stable NixOS 26.05).
+  # No state is persisted across boots, so this only affects fresh-image defaults.
+  system.stateVersion = "26.05";
 }

@@ -5,6 +5,10 @@
   pkgs,
   lib,
   secrets,
+  # Baked github-runner version, provided via flake specialArgs (single source of truth
+  # is the unstable github-runner pinned into the guest image). Empty when evaluated
+  # outside the flake; the freshness monitor degrades gracefully in that case.
+  ciRunnerVersion ? "",
   ...
 }:
 
@@ -66,6 +70,16 @@ in
       type = lib.types.str;
       default = "nixos-ephemeral-ci";
       description = "Generic custom GitHub Actions runner label for this platform.";
+    };
+
+    runnerVersion = lib.mkOption {
+      type = lib.types.str;
+      default = ciRunnerVersion;
+      description = ''
+        github-runner version baked into the current guest image. Used only by the
+        freshness monitor to compare against the latest published GitHub runner release.
+        Defaults to the version threaded from the flake (unstable github-runner).
+      '';
     };
 
     desiredCleanCapacity = lib.mkOption {
@@ -168,6 +182,7 @@ in
           bridgeName
           domainPrefix
           runnerLabel
+          runnerVersion
           desiredCleanCapacity
           maxGuests
           guestMemoryMiB

@@ -1,9 +1,11 @@
 # Builds a disposable NixOS CI runner base qcow2 image.
 #
-# githubRunner is injected from a newer nixpkgs (unstable) because GitHub
-# deprecates old runner versions and refuses connections from them, while the
-# runner in the immutable /nix/store cannot self-update. Pinning a current
-# runner here + --disableupdate in the guest avoids both failure modes.
+# pkgs is the guest package set (nixpkgs-guest = current supported stable NixOS),
+# so the guest OS tracks a supported stable release. Only githubRunner is injected
+# from a newer nixpkgs (unstable): GitHub deprecates old runner versions and refuses
+# connections from them (a self-hosted runner must stay within 30 days of the latest
+# release), while the runner in the immutable /nix/store cannot self-update. Pinning a
+# current runner here + --disableupdate in the guest avoids both failure modes.
 {
   pkgs,
   lib,

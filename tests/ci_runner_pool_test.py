@@ -305,5 +305,327 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(p["provision"], 0)
 
 
+
+AGENT_PREFIX = "agent-ephemeral-"
+AGENT_CAND = "agent-candidate-"
+
+
+def multi_pools():
+    return [
+        {
+            "id": "ci",
+            "prefix": PREFIX,
+            "candidate_prefix": CAND,
+            "desired_idle": 1,
+            "max_guests": 3,
+            "reserved_host_slots": 2,
+            "priority": 100,
+            "provisioning_grace_sec": 300,
+        },
+        {
+            "id": "agent",
+            "prefix": AGENT_PREFIX,
+            "candidate_prefix": AGENT_CAND,
+            "desired_idle": 1,
+            "max_guests": 1,
+            "reserved_host_slots": 0,
+            "priority": 50,
+            "provisioning_grace_sec": 300,
+        },
+    ]
+
+
+def multi_plan(domains, runners_by_pool, github_ok=True, host_max=3):
+    ok = {pid: github_ok for pid in ("ci", "agent")}
+    if isinstance(github_ok, dict):
+        ok = github_ok
+    return pool.classify_multi_pool(
+        {"host_max_guests": host_max},
+        multi_pools(),
+        domains,
+        runners_by_pool,
+        ok,
+        now=2000,
+    )
+
+
+class TestPoolSeparation(unittest.TestCase):
+    def test_ci_runner_classified_only_by_ci_pool(self):
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "b")],
+            {
+                "ci": [gh(PREFIX + "a", busy=False)],
+                "agent": [gh(AGENT_PREFIX + "b", busy=True)],
+            },
+        )
+        self.assertEqual(p["pools"]["ci"]["counts"]["idle"], 1)
+        self.assertEqual(p["pools"]["ci"]["counts"]["busy"], 0)
+        self.assertEqual(p["pools"]["ci"]["counts"]["total"], 1)
+        self.assertNotIn(AGENT_PREFIX + "b", p["pools"]["ci"]["classify"])
+        self.assertEqual(p["pools"]["agent"]["counts"]["busy"], 1)
+        self.assertNotIn(PREFIX + "a", p["pools"]["agent"]["classify"])
+
+    def test_agent_candidate_excluded_from_agent_reconciliation(self):
+        p = multi_plan(
+            [dom(AGENT_PREFIX + "a"), dom(AGENT_CAND + "x"), dom("homeassistant")],
+            {"ci": [], "agent": [gh(AGENT_PREFIX + "a", busy=False)]},
+        )
+        self.assertEqual(p["pools"]["agent"]["counts"]["total"], 1)
+        self.assertNotIn(AGENT_CAND + "x", p["pools"]["agent"]["classify"])
+        self.assertNotIn("homeassistant", p["destroy"])
+
+    def test_ci_candidate_excluded_from_ci_reconciliation(self):
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(CAND + "x")],
+            {"ci": [gh(PREFIX + "a", busy=False)], "agent": []},
+        )
+        self.assertEqual(p["pools"]["ci"]["counts"]["total"], 1)
+        self.assertNotIn(CAND + "x", p["pools"]["ci"]["classify"])
+        self.assertNotIn(CAND + "x", p["destroy"])
+
+    def test_foreign_domains_untouched(self):
+        p = multi_plan(
+            [dom("homeassistant"), dom("unrelated-vm")],
+            {"ci": [], "agent": []},
+        )
+        self.assertEqual(p["destroy"], [])
+        self.assertEqual(p["host_total"], 0)
+
+
+class TestHostCapacity(unittest.TestCase):
+    def test_agent_cannot_exceed_its_cap(self):
+        p = multi_plan(
+            [dom(AGENT_PREFIX + "a")],
+            {"ci": [], "agent": [gh(AGENT_PREFIX + "a", busy=True)]},
+        )
+        # busy agent, desired idle 1, but max_guests=1 → no more agent provision
+        self.assertEqual(p["provision"]["agent"], 0)
+
+    def test_combined_pools_cannot_exceed_host_cap(self):
+        # 2 CI busy + 1 agent busy = host full; neither provisions
+        p = multi_plan(
+            [
+                dom(PREFIX + "a"),
+                dom(PREFIX + "b"),
+                dom(AGENT_PREFIX + "x"),
+            ],
+            {
+                "ci": [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=True)],
+                "agent": [gh(AGENT_PREFIX + "x", busy=True)],
+            },
+        )
+        self.assertEqual(p["host_total"], 3)
+        self.assertEqual(p["provision"]["ci"], 0)
+        self.assertEqual(p["provision"]["agent"], 0)
+        self.assertTrue(p["host_saturated"])
+
+    def test_ci_idle_capacity_preserved_with_busy_agent(self):
+        # Agent occupies 1 slot; CI reserved=2 → CI can still hold 2 guests.
+        # 1 busy CI + 1 busy agent, host has 1 free → CI gets the idle spare.
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x")],
+            {
+                "ci": [gh(PREFIX + "a", busy=True)],
+                "agent": [gh(AGENT_PREFIX + "x", busy=True)],
+            },
+        )
+        self.assertEqual(p["provision"]["ci"], 1)
+        self.assertEqual(p["provision"]["agent"], 0)
+        self.assertEqual(p["host_total_after_provision"], 3)
+
+    def test_busy_agent_counts_against_host_capacity(self):
+        p = multi_plan(
+            [
+                dom(PREFIX + "a"),
+                dom(PREFIX + "b"),
+                dom(AGENT_PREFIX + "x"),
+            ],
+            {
+                "ci": [
+                    gh(PREFIX + "a", busy=False),
+                    gh(PREFIX + "b", busy=True),
+                ],
+                "agent": [gh(AGENT_PREFIX + "x", busy=True)],
+            },
+        )
+        self.assertEqual(p["host_total"], 3)
+        self.assertEqual(p["provision"]["ci"], 0)
+        self.assertEqual(p["provision"]["agent"], 0)
+
+    def test_ci_priority_over_agent_when_contending(self):
+        # Empty host: both want 1 idle. CI priority wins first; agent also fits.
+        p = multi_plan([], {"ci": [], "agent": []})
+        self.assertEqual(p["provision"]["ci"], 1)
+        self.assertEqual(p["provision"]["agent"], 1)
+        self.assertEqual(p["host_total_after_provision"], 2)
+
+    def test_agent_blocked_when_only_ci_reserved_slots_remain(self):
+        # 2 CI guests occupy the reserved floor; 1 host slot free but must stay
+        # available for CI reservation need? reserved=2, ci_total=2 → need=0,
+        # so agent CAN take the remaining 1 slot.
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(PREFIX + "b")],
+            {
+                "ci": [gh(PREFIX + "a", busy=True), gh(PREFIX + "b", busy=True)],
+                "agent": [],
+            },
+        )
+        # CI wants idle replacement but host remaining after CI wish:
+        # CI uncapped wish=1, host_remaining=1, reserved_for_others=0 → CI takes 1
+        # then host full → agent 0. CI starvation protection via priority.
+        self.assertEqual(p["provision"]["ci"], 1)
+        self.assertEqual(p["provision"]["agent"], 0)
+
+    def test_simultaneous_reconcile_cannot_race_past_host_cap(self):
+        # Pure planner is atomic: given snapshot at 2 guests, allocations sum
+        # cannot exceed remaining 1 slot; CI priority gets it.
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x")],
+            {
+                "ci": [gh(PREFIX + "a", busy=True)],
+                "agent": [gh(AGENT_PREFIX + "x", busy=True)],
+            },
+        )
+        self.assertEqual(sum(p["provision"].values()), 1)
+        self.assertLessEqual(p["host_total_after_provision"], 3)
+
+    def test_provisioning_guests_count_correctly(self):
+        p = multi_plan(
+            [dom(PREFIX + "boot", created_at=1900)],
+            {"ci": [], "agent": []},
+        )
+        self.assertEqual(p["pools"]["ci"]["counts"]["provisioning"], 1)
+        self.assertEqual(p["provision"]["ci"], 0)  # provisioning satisfies idle
+
+    def test_uncertain_fail_closed_no_overprovision(self):
+        p = multi_plan(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x")],
+            {"ci": [], "agent": []},
+            github_ok=False,
+        )
+        self.assertEqual(p["pools"]["ci"]["counts"]["uncertain"], 1)
+        self.assertEqual(p["pools"]["agent"]["counts"]["uncertain"], 1)
+        self.assertEqual(p["provision"]["ci"], 0)
+        self.assertEqual(p["provision"]["agent"], 0)
+        self.assertEqual(p["destroy"], [])
+
+    def test_github_outage_does_not_overprovision(self):
+        p = multi_plan([], {"ci": [], "agent": []}, github_ok=False)
+        self.assertEqual(p["provision"]["ci"], 0)
+        self.assertEqual(p["provision"]["agent"], 0)
+
+
+class TestAgentLifecyclePlanning(unittest.TestCase):
+    def test_agent_stale_destroyed_and_ci_untouched(self):
+        p = multi_plan(
+            [
+                dom(AGENT_PREFIX + "dead", state="shut off"),
+                dom(PREFIX + "a"),
+            ],
+            {"ci": [gh(PREFIX + "a", busy=False)], "agent": []},
+        )
+        self.assertIn(AGENT_PREFIX + "dead", p["destroy"])
+        self.assertNotIn(PREFIX + "a", p["destroy"])
+        self.assertEqual(p["pools"]["ci"]["counts"]["idle"], 1)
+
+    def test_ci_cleanup_cannot_delete_agent_state(self):
+        # Single-pool classify for CI must ignore agent domains.
+        p = pool.classify_domains(
+            cfg(),
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x", state="shut off")],
+            [gh(PREFIX + "a", busy=False)],
+            github_ok=True,
+            now=2000,
+        )
+        self.assertNotIn(AGENT_PREFIX + "x", p["destroy"])
+        self.assertNotIn(AGENT_PREFIX + "x", p["classify"])
+
+
+class TestAdmitProductionGuard(unittest.TestCase):
+    """Final creation-site guard: pool max + host max + physical (incl. candidates)."""
+
+    PROD = ["ci-ephemeral-", "agent-ephemeral-"]
+    CAND = ["ci-candidate-", "agent-candidate-"]
+
+    def _admit(self, domains, pool_prefix=PREFIX, pool_max=3, host_max=3):
+        return pool.admit_production_guest(
+            host_max, pool_max, self.PROD, self.CAND, pool_prefix, domains)
+
+    def test_allows_when_under_all_ceilings(self):
+        d = self._admit([dom(PREFIX + "a"), dom(PREFIX + "b")])
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["reason"], "ok")
+        self.assertEqual(d["production_total"], 2)
+        self.assertEqual(d["physical_total"], 2)
+
+    def test_blocks_at_pool_max_even_if_host_has_room(self):
+        # Agent pool_max=1 already occupied; host has room (1 of 3).
+        d = self._admit(
+            [dom(AGENT_PREFIX + "a")],
+            pool_prefix=AGENT_PREFIX, pool_max=1, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "pool_max")
+
+    def test_blocks_at_host_max_even_if_pool_has_room(self):
+        # CI pool_max=3, already 2 CI + 1 agent = host full; CI still < pool max.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "host_max_production")
+        self.assertEqual(d["pool_total"], 2)
+        self.assertEqual(d["production_total"], 3)
+
+    def test_direct_ci_provision_cannot_bypass_host_ceiling(self):
+        # The unsafe example from review: 2 CI + 1 agent, then `provision ci`.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+
+    def test_candidate_occupying_final_slot_blocks_production(self):
+        # 2 production + 1 candidate = physical full; production must not create 4th.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x"), dom(CAND + "c")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "physical_max")
+        self.assertEqual(d["production_total"], 2)
+        self.assertEqual(d["physical_total"], 3)
+
+
+class TestAdmitCandidateGuard(unittest.TestCase):
+    PROD = ["ci-ephemeral-", "agent-ephemeral-"]
+    CAND = ["ci-candidate-", "agent-candidate-"]
+
+    def _admit(self, domains, physical_max=3, overcommit=False):
+        return pool.admit_candidate_guest(
+            physical_max, self.PROD, self.CAND, domains, allow_overcommit=overcommit)
+
+    def test_two_production_zero_candidate_permits_one(self):
+        d = self._admit([dom(PREFIX + "a"), dom(AGENT_PREFIX + "x")])
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["physical_total"], 2)
+
+    def test_three_production_denies_candidate(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")])
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "physical_max")
+
+    def test_two_production_one_candidate_denies_another(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(AGENT_PREFIX + "x"), dom(CAND + "c")])
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["candidate_total"], 1)
+        self.assertEqual(d["physical_total"], 3)
+
+    def test_overcommit_override_allows_with_reason(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            overcommit=True)
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["reason"], "overcommit_override")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

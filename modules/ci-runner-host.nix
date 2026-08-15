@@ -1,5 +1,5 @@
-# Host prerequisites for the ephemeral CI runner platform:
-# Directories, packages, libvirt bridge allowlist, enable option.
+# Host prerequisites for the ephemeral GitHub Actions runner platform:
+# Directories, packages, libvirt bridge allowlist, multi-pool options.
 {
   config,
   pkgs,
@@ -15,39 +15,121 @@
 let
   cfg = config.services.ciRunner;
   ciRoot = cfg.dataDir;
+  secretsCi = secrets.ciRunner or { };
+  secretsAgent = secrets.agentRunner or { };
+
+  poolSubmodule =
+    {
+      name,
+      defaultPrefix,
+      defaultCandidate,
+      defaultLabel,
+      defaultDesiredIdle,
+      defaultMax,
+      defaultReserved,
+      defaultPriority,
+      defaultOwner,
+      defaultRepo,
+    }:
+    lib.types.submodule {
+      options = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = name == "ci";
+          description = "Enable the ${name} runner pool.";
+        };
+        domainPrefix = lib.mkOption {
+          type = lib.types.str;
+          default = defaultPrefix;
+        };
+        candidatePrefix = lib.mkOption {
+          type = lib.types.str;
+          default = defaultCandidate;
+        };
+        runnerLabel = lib.mkOption {
+          type = lib.types.str;
+          default = defaultLabel;
+        };
+        desiredIdleCapacity = lib.mkOption {
+          type = lib.types.ints.unsigned;
+          default = defaultDesiredIdle;
+          description = ''
+            Desired healthy online idle runners (busy=false). 0 disables idle
+            replenishment (polling pools typically use 1).
+          '';
+        };
+        maxGuests = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = defaultMax;
+        };
+        reservedHostSlots = lib.mkOption {
+          type = lib.types.ints.unsigned;
+          default = defaultReserved;
+          description = ''
+            Host guest slots reserved for this pool that lower-priority pools may
+            not consume (CI starvation protection when an agent is busy).
+          '';
+        };
+        priority = lib.mkOption {
+          type = lib.types.int;
+          default = defaultPriority;
+          description = "Higher priority pools provision first under host contention.";
+        };
+        guestMemoryMiB = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 4096;
+        };
+        guestVcpus = lib.mkOption {
+          type = lib.types.ints.positive;
+          default = 2;
+        };
+        github = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Enable GitHub registration for this pool (also gated by services.ciRunner.github.enable).";
+          };
+          owner = lib.mkOption {
+            type = lib.types.str;
+            default = defaultOwner;
+          };
+          repo = lib.mkOption {
+            type = lib.types.str;
+            default = defaultRepo;
+          };
+        };
+      };
+    };
 in
 {
   options.services.ciRunner = {
-    enable = lib.mkEnableOption "ephemeral GitHub Actions CI runner platform (libvirt VMs)";
+    enable = lib.mkEnableOption "ephemeral GitHub Actions runner platform (libvirt VMs)";
 
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/data/ci";
-      description = "Root directory for CI base images, overlays, seeds, and state (prefer fast persistent storage).";
+      description = "Root directory for base images, overlays, seeds, and state.";
     };
 
     networkName = lib.mkOption {
       type = lib.types.str;
       default = "ci-net";
-      description = "libvirt network name for CI guests.";
+      description = "libvirt network name shared by all runner pools.";
     };
 
     bridgeName = lib.mkOption {
       type = lib.types.str;
       default = "virbr-ci";
-      description = "Bridge interface created for the CI libvirt NAT network.";
     };
 
     subnetCidr = lib.mkOption {
       type = lib.types.str;
       default = "192.168.67.0/24";
-      description = "Dedicated CI NAT subnet (must not overlap LAN or Podman networks).";
     };
 
     gatewayAddress = lib.mkOption {
       type = lib.types.str;
       default = "192.168.67.1";
-      description = "CI network gateway address on the host.";
     };
 
     dhcpRangeStart = lib.mkOption {
@@ -60,153 +142,147 @@ in
       default = "192.168.67.50";
     };
 
-    domainPrefix = lib.mkOption {
-      type = lib.types.str;
-      default = "ci-ephemeral-";
-      description = "libvirt domain name prefix for production runners; reaper/reconciler only manage this prefix.";
-    };
-
-    candidatePrefix = lib.mkOption {
-      type = lib.types.str;
-      default = "ci-candidate-";
-      description = "libvirt domain name prefix for candidate-image validation VMs (never managed by the production pool).";
-    };
-
-    runnerLabel = lib.mkOption {
-      type = lib.types.str;
-      default = "nixos-ephemeral-ci";
-      description = "Generic custom GitHub Actions runner label for this platform.";
+    hostMaxGuests = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 3;
+      description = ''
+        Hard ceiling on concurrent managed production guests across ALL pools.
+        Per-pool maxGuests cannot bypass this limit. Evidence-based for this host
+        (HA VM + dense Podman; swap pressure already observed at 3×4 GiB guests).
+      '';
     };
 
     runnerVersion = lib.mkOption {
       type = lib.types.str;
       default = ciRunnerVersion;
-      description = ''
-        github-runner version baked into the current guest image. Used only by the
-        freshness monitor to compare against the latest published GitHub runner release.
-        Defaults to the version threaded from the flake (unstable github-runner).
-      '';
-    };
-
-    desiredIdleCapacity = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 1;
-      description = ''
-        Desired number of healthy online idle ephemeral runners (busy=false).
-        When idle drops below this and total managed guests are below maxGuests,
-        the reconciler provisions replacements.
-      '';
-    };
-
-    maxGuests = lib.mkOption {
-      type = lib.types.ints.positive;
-      # Evidence-based default for a ~64 GiB host that already runs Home Assistant +
-      # a dense Podman homelab. Architectural ceiling is 10; raise only after
-      # confirming RAM/CPU headroom (see docs/configuration/ci-runner.md).
-      default = 3;
-      description = ''
-        Hard cap on concurrent managed production CI guests in ALL states
-        (provisioning, idle, busy, shutting down, uncertain). Architectural
-        ceiling is 10; the live default is deliberately lower and host-specific.
-      '';
-    };
-
-    guestMemoryMiB = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 4096;
-    };
-
-    guestVcpus = lib.mkOption {
-      type = lib.types.ints.positive;
-      default = 2;
     };
 
     provisioningGraceSec = lib.mkOption {
       type = lib.types.ints.positive;
       default = 300;
-      description = "Seconds a newly started guest may remain without an online GitHub runner before being treated as uncertain/stale.";
     };
 
     lanCidr = lib.mkOption {
       type = lib.types.str;
       default = "192.168.10.0/24";
-      description = "Trusted LAN CIDR denied to CI guests by default.";
     };
 
     lanProbeTarget = lib.mkOption {
       type = lib.types.str;
       default = "192.168.10.7";
-      description = "LAN address used by dummy isolation probes (typically the host br0 address).";
     };
 
+    # Top-level GitHub App identity (host-only key). Enables registration for
+    # every pool that has owner/repo when github.enable is true.
     github = {
       enable = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Enable GitHub App registration for the idle runner pool.";
+        description = "Master switch: enable GitHub App registration for configured pools.";
       };
-
-      owner = lib.mkOption {
-        type = lib.types.str;
-        default = (secrets.ciRunner or { }).githubOwner or "";
-        description = "GitHub repository owner.";
-      };
-
-      repo = lib.mkOption {
-        type = lib.types.str;
-        default = (secrets.ciRunner or { }).githubRepo or "";
-        description = "GitHub repository name.";
-      };
-
       appId = lib.mkOption {
         type = lib.types.str;
-        default = (secrets.ciRunner or { }).githubAppId or "";
-        description = "GitHub App ID.";
+        default = secretsCi.githubAppId or "";
       };
-
       installationId = lib.mkOption {
         type = lib.types.str;
-        default = (secrets.ciRunner or { }).githubAppInstallationId or "";
-        description = "GitHub App installation ID.";
+        default = secretsCi.githubAppInstallationId or "";
       };
-
       privateKeyFile = lib.mkOption {
         type = lib.types.path;
         default = "/persist/etc/secrets/ci-runner/github-app.pem";
         description = "Host-only GitHub App private key (never injected into guests).";
       };
+      # Legacy flat owner/repo — applied to the CI pool when pools.ci.github.* unset.
+      owner = lib.mkOption {
+        type = lib.types.str;
+        default = secretsCi.githubOwner or "";
+        description = "Legacy alias for pools.ci.github.owner.";
+      };
+      repo = lib.mkOption {
+        type = lib.types.str;
+        default = secretsCi.githubRepo or "";
+        description = "Legacy alias for pools.ci.github.repo.";
+      };
     };
 
-    # Explicit hostname → address mappings served by libvirt dnsmasq on ci-net.
-    # Guests resolve these without LAN AdGuard / router DNS. Public names still
-    # resolve via public forwarders (1.1.1.1 / 8.8.8.8). DNS is not authorization;
-    # pair with hostAllowTcp / internalAllowTcp for the actual TCP exception.
+    # Legacy top-level CI pool aliases (existing configuration.nix).
+    domainPrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "ci-ephemeral-";
+    };
+    candidatePrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "ci-candidate-";
+    };
+    runnerLabel = lib.mkOption {
+      type = lib.types.str;
+      default = "nixos-ephemeral-ci";
+    };
+    desiredIdleCapacity = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 1;
+    };
+    maxGuests = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 3;
+    };
+    guestMemoryMiB = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 4096;
+    };
+    guestVcpus = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+    };
+
+    pools = {
+      ci = lib.mkOption {
+        type = poolSubmodule {
+          name = "ci";
+          defaultPrefix = "ci-ephemeral-";
+          defaultCandidate = "ci-candidate-";
+          defaultLabel = "nixos-ephemeral-ci";
+          defaultDesiredIdle = 1;
+          defaultMax = 3;
+          defaultReserved = 2;
+          defaultPriority = 100;
+          defaultOwner = secretsCi.githubOwner or "";
+          defaultRepo = secretsCi.githubRepo or "";
+        };
+        default = { };
+        description = "CI disposable runner pool (label nixos-ephemeral-ci).";
+      };
+      agent = lib.mkOption {
+        type = poolSubmodule {
+          name = "agent";
+          defaultPrefix = "agent-ephemeral-";
+          defaultCandidate = "agent-candidate-";
+          defaultLabel = "nixos-ephemeral-agent";
+          defaultDesiredIdle = 1;
+          defaultMax = 1;
+          defaultReserved = 0;
+          defaultPriority = 50;
+          defaultOwner = secretsAgent.githubOwner or secretsCi.githubOwner or "";
+          defaultRepo = secretsAgent.githubRepo or secretsCi.githubRepo or "";
+        };
+        default = { };
+        description = "Agent disposable runner pool (label nixos-ephemeral-agent).";
+      };
+    };
+
     internalDnsHosts = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
           options = {
-            name = lib.mkOption {
-              type = lib.types.str;
-              description = "DNS name to resolve inside ci-net (e.g. homepage.example.com).";
-            };
-            address = lib.mkOption {
-              type = lib.types.str;
-              description = "IPv4 address returned for this name.";
-            };
+            name = lib.mkOption { type = lib.types.str; };
+            address = lib.mkOption { type = lib.types.str; };
           };
         }
       );
       default = [ ];
-      description = ''
-        Static DNS host records for the dedicated CI libvirt network. Does not
-        expose general internal DNS. Empty preserves public-only resolution via
-        the CI network's public forwarders.
-      '';
     };
 
-    # Host-local services (INPUT path): CI guest → approved host address:port.
-    # Use when the destination IP is configured on this NixOS host (e.g. Traefik
-    # on br0). Distinct from internalAllowTcp (FORWARD to other private hosts).
     hostAllowTcp = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
@@ -217,14 +293,8 @@ in
         }
       );
       default = [ ];
-      description = ''
-        Narrow INPUT exceptions from the CI bridge to host-local TCP listeners.
-        Inserted before the general virbr-ci reject. Does not open SSH, AdGuard,
-        or other host services unless listed.
-      '';
     };
 
-    # Forwarded private destinations (FORWARD path): CI guest → other RFC1918 host.
     internalAllowTcp = lib.mkOption {
       type = lib.types.listOf (
         lib.types.submodule {
@@ -235,91 +305,166 @@ in
         }
       );
       default = [ ];
-      description = ''
-        Explicit FORWARD TCP exceptions to non-host private addresses (inserted
-        before the RFC1918 reject). Prefer hostAllowTcp when the destination is
-        this host. Empty preserves full private-network denial.
-      '';
     };
 
-    # Optional HTTPS URLs probed during dummy / validate-candidate runs.
-    # Not hard-required for every candidate image build unless the operator
-    # passes --probe-url or configures this list.
     validationUrls = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      description = ''
-        Default URLs for optional disposable-guest HTTPS probes (normal TLS
-        verification). Operators can also pass --probe-url to validate-candidate.
-      '';
     };
 
     package = lib.mkOption {
       type = lib.types.package;
       internal = true;
-      description = "ci-runnerctl package";
     };
   };
 
   config = lib.mkIf cfg.enable (
     let
+      # Merge legacy top-level CI aliases + github.owner/repo into the CI pool.
+      ciEffective = cfg.pools.ci // {
+        domainPrefix = cfg.domainPrefix;
+        candidatePrefix = cfg.candidatePrefix;
+        runnerLabel = cfg.runnerLabel;
+        desiredIdleCapacity = cfg.desiredIdleCapacity;
+        maxGuests = cfg.maxGuests;
+        guestMemoryMiB = cfg.guestMemoryMiB;
+        guestVcpus = cfg.guestVcpus;
+        github = cfg.pools.ci.github // {
+          owner =
+            if cfg.pools.ci.github.owner != "" then
+              cfg.pools.ci.github.owner
+            else
+              cfg.github.owner;
+          repo =
+            if cfg.pools.ci.github.repo != "" then
+              cfg.pools.ci.github.repo
+            else
+              cfg.github.repo;
+          enable = cfg.github.enable || cfg.pools.ci.github.enable;
+        };
+      };
+
+      agentEffective = cfg.pools.agent // {
+        github = cfg.pools.agent.github // {
+          owner =
+            if cfg.pools.agent.github.owner != "" then
+              cfg.pools.agent.github.owner
+            else
+              cfg.github.owner;
+          repo =
+            if cfg.pools.agent.github.repo != "" then
+              cfg.pools.agent.github.repo
+            else
+              cfg.github.repo;
+          enable = cfg.github.enable || cfg.pools.agent.github.enable;
+        };
+      };
+
+      effectivePools = {
+        ci = ciEffective;
+      }
+      // lib.optionalAttrs agentEffective.enable { agent = agentEffective; };
+
+      poolList = lib.mapAttrsToList (id: p: {
+        id = id;
+        enable = true;
+        prefix = p.domainPrefix;
+        candidate_prefix = p.candidatePrefix;
+        runner_label = p.runnerLabel;
+        desired_idle = p.desiredIdleCapacity;
+        max_guests = p.maxGuests;
+        reserved_host_slots = p.reservedHostSlots;
+        priority = p.priority;
+        guest_memory_mib = p.guestMemoryMiB;
+        guest_vcpus = p.guestVcpus;
+        github_enable = p.github.enable;
+        github_owner = p.github.owner;
+        github_repo = p.github.repo;
+      }) effectivePools;
+
       ciPkg = pkgs.callPackage ../packages/ci-runner-provisioner.nix {
         inherit (cfg)
           dataDir
           networkName
           bridgeName
-          domainPrefix
-          candidatePrefix
-          runnerLabel
           runnerVersion
-          desiredIdleCapacity
-          maxGuests
-          guestMemoryMiB
-          guestVcpus
           lanProbeTarget
           provisioningGraceSec
           validationUrls
           ;
+        hostMaxGuests = cfg.hostMaxGuests;
+        pools = poolList;
+        # Legacy single-pool fields (CI) kept for flake package defaults / scripts.
+        domainPrefix = ciEffective.domainPrefix;
+        candidatePrefix = ciEffective.candidatePrefix;
+        runnerLabel = ciEffective.runnerLabel;
+        desiredIdleCapacity = ciEffective.desiredIdleCapacity;
+        maxGuests = ciEffective.maxGuests;
+        guestMemoryMiB = ciEffective.guestMemoryMiB;
+        guestVcpus = ciEffective.guestVcpus;
         githubEnable = cfg.github.enable;
-        githubOwner = cfg.github.owner;
-        githubRepo = cfg.github.repo;
+        githubOwner = ciEffective.github.owner;
+        githubRepo = ciEffective.github.repo;
         githubAppId = cfg.github.appId;
         githubInstallationId = cfg.github.installationId;
         githubPrivateKeyFile = cfg.github.privateKeyFile;
         textfileDir = "/var/lib/node_exporter_textfile";
       };
+
+      prefixPairs = lib.mapAttrsToList (_: p: {
+        prod = p.domainPrefix;
+        cand = p.candidatePrefix;
+      }) effectivePools;
     in
     {
       assertions = [
         {
-          assertion = cfg.desiredIdleCapacity <= cfg.maxGuests;
-          message = "services.ciRunner.desiredIdleCapacity must be <= maxGuests";
+          assertion = cfg.hostMaxGuests >= 1;
+          message = "services.ciRunner.hostMaxGuests must be >= 1";
         }
         {
-          assertion = cfg.domainPrefix != cfg.candidatePrefix;
-          message = "services.ciRunner.domainPrefix and candidatePrefix must be distinct namespaces";
+          assertion = builtins.all (
+            p: p.desiredIdleCapacity <= p.maxGuests
+          ) (lib.attrValues effectivePools);
+          message = "each pool's desiredIdleCapacity must be <= maxGuests";
         }
         {
-          assertion = !(lib.hasPrefix cfg.domainPrefix cfg.candidatePrefix)
-            && !(lib.hasPrefix cfg.candidatePrefix cfg.domainPrefix);
-          message = "services.ciRunner domain/candidate prefixes must not be prefix-overlapping";
+          assertion = builtins.all (
+            p: p.reservedHostSlots <= cfg.hostMaxGuests
+          ) (lib.attrValues effectivePools);
+          message = "reservedHostSlots must be <= hostMaxGuests";
+        }
+        {
+          assertion =
+            (lib.length (lib.attrValues effectivePools))
+            == (lib.length (lib.unique (map (p: p.domainPrefix) (lib.attrValues effectivePools))));
+          message = "services.ciRunner pool domainPrefix values must be unique";
+        }
+        {
+          assertion = builtins.all (
+            pair:
+            pair.prod != pair.cand
+            && !(lib.hasPrefix pair.prod pair.cand)
+            && !(lib.hasPrefix pair.cand pair.prod)
+          ) prefixPairs;
+          message = "each pool's domain/candidate prefixes must be distinct and non-overlapping";
         }
         {
           assertion =
             !(cfg.github.enable)
             || (
-              cfg.github.owner != ""
-              && cfg.github.repo != ""
-              && cfg.github.appId != ""
+              cfg.github.appId != ""
               && cfg.github.installationId != ""
+              && builtins.all (
+                p: !(p.github.enable) || (p.github.owner != "" && p.github.repo != "")
+              ) (lib.attrValues effectivePools)
             );
-          message = "services.ciRunner.github.enable requires owner/repo/appId/installationId (see secrets.ciRunner)";
+          message = "services.ciRunner.github.enable requires appId/installationId and owner/repo for each GitHub-enabled pool";
         }
       ];
 
       services.ciRunner.package = ciPkg;
 
-      # Allow qemu to attach CI guests to the dedicated bridge.
       virtualisation.libvirtd.allowedBridges = lib.mkAfter [ cfg.bridgeName ];
 
       environment.systemPackages = [
@@ -332,7 +477,6 @@ in
         ciPkg
       ];
 
-      # Prefer explicit mkdir over tmpfiles for /data/ci (parent /data may be user-owned).
       system.activationScripts.ci-runner-dirs = lib.stringAfter [ "users" ] ''
         mkdir -p ${ciRoot}/base ${ciRoot}/overlays ${ciRoot}/seeds ${ciRoot}/state/guests ${ciRoot}/logs
         chmod 0750 ${ciRoot} || true

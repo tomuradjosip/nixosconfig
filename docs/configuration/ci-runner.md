@@ -1,6 +1,15 @@
-# Ephemeral GitHub Actions CI runner platform
+# Ephemeral GitHub Actions runner platform
 
-Disposable KVM/QEMU/libvirt NixOS VMs provide repository-scoped, one-job GitHub Actions runners. CI jobs never execute on the trusted NixOS host.
+Disposable KVM/QEMU/libvirt NixOS VMs provide repository-scoped, one-job GitHub Actions runners. Job code never executes on the trusted NixOS host.
+
+The platform runs **two independently labelled pools** that share one physical-host guest ceiling:
+
+| Pool | Label | Domain prefix | Purpose |
+|------|-------|---------------|---------|
+| CI | `nixos-ephemeral-ci` | `ci-ephemeral-*` | PR/push CI (Shopforge and validation harness) |
+| Agent | `nixos-ephemeral-agent` | `agent-ephemeral-*` | Long-running Shopforge Developer / Reviewer agents |
+
+Consuming workflows target exactly one label. A job with `runs-on: nixos-ephemeral-ci` cannot land on an agent guest, and vice versa.
 
 > Live validation evidence and results: **[CI runner validation report](ci-runner-validation.md)**.
 
@@ -10,38 +19,62 @@ Disposable KVM/QEMU/libvirt NixOS VMs provide repository-scoped, one-job GitHub 
 trusted NixOS host (provisioner / GitHub App key / libvirt)
         |
         | systemd reconcile (30s) + reaper  — flock(provision.lock)
+        | multi-pool planner under hostMaxGuests + CI reserved slots
         v
-immutable base qcow2  +  per-guest COW overlay (pinned path)  +  throwaway seed ISO
+immutable base qcow2  +  per-guest COW overlay  +  throwaway seed ISO
         |
-        v
-CI guest on dedicated NAT network (ci-net / virbr-ci)
+        +-- CI guest     label nixos-ephemeral-ci      prefix ci-ephemeral-*
+        +-- Agent guest  label nixos-ephemeral-agent   prefix agent-ephemeral-*
         |
-        | --ephemeral runner, label nixos-ephemeral-ci
+        | both on shared isolated NAT (ci-net / virbr-ci)
         v
 one GitHub Actions job → guest poweroff → host destroys overlay/seed/domain
         |
         v
-reconciler restores desiredIdleCapacity idle guests (subject to maxGuests)
+reconciler restores each pool's desiredIdleCapacity (subject to per-pool max
+and the shared host ceiling; CI provisions before agent under contention)
+```
+
+Shopforge remote-agent flow (application workflows are out of scope here):
+
+```text
+phone / workflow_dispatch
+        ↓
+Developer on nixos-ephemeral-agent  →  branch + draft PR  →  agent guest gone
+        ↓
+PR CI on nixos-ephemeral-ci (independent pool; CI reserved slots protect this)
+        ↓
+Reviewer on a fresh nixos-ephemeral-agent guest  →  gone
 ```
 
 ## Trust boundaries
 
 | Location | Allowed | Forbidden |
 |----------|---------|-----------|
-| Host | GitHub App private key, libvirt, base images | Job code execution |
-| Guest | Short-lived registration token (seed ISO only) | App private key, host mounts/sockets, LAN |
+| Host | GitHub App private key, libvirt, base images | Job code execution; Cursor API keys; app write tokens |
+| Guest | Short-lived registration token (seed ISO only); job-level Actions secrets at runtime | App private key, host mounts/sockets, LAN |
 | After teardown | Host journal + metrics | Overlay, seed, runner state |
 
 Guests do **not** attach to `br0`. Docker Engine is **not** installed. **Rootful Podman**
 is available **inside disposable guests only** (guest-local storage/networking; no host
 Docker/Podman socket; no Docker socket compatibility alias).
 
+**Secrets boundary:** `CURSOR_API_KEY`, GitHub write tokens, and application secrets must
+arrive only as GitHub Actions job secrets at execution time. They are never baked into the
+NixOS image, seed ISO, repository, or host configuration. Host GitHub App auth is used only
+to register/list ephemeral runners.
+
 ## Network policy
 
+CI and agent pools **share** the same isolated libvirt NAT (`ci-net`). A second network would
+not improve isolation under the same iptables policy and would complicate Verdaccio/DNS
+exceptions. Agent guests are more privileged logically (may push branches / open PRs via
+job secrets) — that is a reason to keep the same narrow policy, not to widen it.
+
 - **Network:** libvirt NAT `ci-net`, bridge `virbr-ci`, subnet `192.168.67.0/24`
-- **DNS:** guest uses DHCP → libvirt dnsmasq on the CI gateway (`192.168.67.1`). That dnsmasq serves only `services.ciRunner.internalDnsHosts` as static records and forwards all other names to public resolvers (`1.1.1.1` / `8.8.8.8`). Guests do **not** use LAN AdGuard or the router resolver, so other internal names are not visible by default.
-- **FORWARD:** deny CI → RFC1918; allow Internet HTTPS via NAT; optional `services.ciRunner.internalAllowTcp` for exceptions to *other* private hosts
-- **INPUT on `virbr-ci`:** DHCP + DNS to the CI gateway only; optional `services.ciRunner.hostAllowTcp` for narrow host-local TCP exceptions; reject SSH, AdGuard UI, and all other host services
+- **DNS:** guest uses DHCP → libvirt dnsmasq on the gateway (`192.168.67.1`). That dnsmasq serves only `services.ciRunner.internalDnsHosts` as static records and forwards all other names to public resolvers (`1.1.1.1` / `8.8.8.8`). Guests do **not** use LAN AdGuard or the router resolver.
+- **FORWARD:** deny guest → RFC1918; allow Internet HTTPS via NAT; optional `internalAllowTcp`
+- **INPUT on `virbr-ci`:** DHCP + DNS to the gateway only; optional `hostAllowTcp`; reject SSH, AdGuard UI, and all other host services
 
 ### Explicit internal hostname access
 
@@ -52,54 +85,51 @@ services.ciRunner = {
   internalDnsHosts = [
     { name = "verdaccio.iktstudio.com"; address = "192.168.10.7"; }
   ];
-  # Case A — destination IP is this NixOS host (Traefik on br0) → INPUT
   hostAllowTcp = [
     { address = "192.168.10.7"; port = 443; }
   ];
-  # Case B — destination is another private host → FORWARD (unused for Verdaccio)
-  # internalAllowTcp = [ { address = "192.168.10.x"; port = 443; } ];
   validationUrls = [ "https://verdaccio.iktstudio.com/" ];
 };
 ```
 
 | Knob | Path | Meaning |
 |------|------|---------|
-| `internalDnsHosts` | ci-net dnsmasq | Name → IP inside CI only |
-| `hostAllowTcp` | iptables **INPUT** (`ci-runner-in`) | CI → host-local `address:port` |
-| `internalAllowTcp` | iptables **FORWARD** (`ci-runner-fwd`) | CI → other RFC1918 `address:port` |
+| `internalDnsHosts` | ci-net dnsmasq | Name → IP inside ci-net only |
+| `hostAllowTcp` | iptables **INPUT** (`ci-runner-in`) | guest → host-local `address:port` |
+| `internalAllowTcp` | iptables **FORWARD** (`ci-runner-fwd`) | guest → other RFC1918 `address:port` |
 
-**Why INPUT vs FORWARD matters:** `verdaccio.iktstudio.com` resolves to `192.168.10.7`, which is this host's `br0` address where Traefik publishes `:443`. Packets from `virbr-ci` to a local host address hit **INPUT**, not FORWARD. A FORWARD-only allowlist would not open the path. Broad LAN access (`CI → 192.168.10.0/24`) remains denied.
+**Why INPUT vs FORWARD matters:** `verdaccio.iktstudio.com` resolves to `192.168.10.7`, which is this host's `br0` address where Traefik publishes `:443`. Packets from `virbr-ci` to a local host address hit **INPUT**, not FORWARD. Broad LAN access remains denied.
 
 **TLS:** guests must use normal certificate verification (`curl` without `-k` / `--insecure`).
 
-**Shared Traefik IP limitation:** allowing `192.168.10.7:443` permits TCP to every TLS virtual host terminated on that same Traefik listener if the guest supplies another Host/SNI. Layer 3/4 filtering cannot provide hostname isolation. Acceptable for the current trust model (disposable CI + explicit allowlist); a stronger hostname ACL would require an application-layer proxy, not iptables.
+**Shared Traefik IP limitation:** allowing `192.168.10.7:443` permits TCP to every TLS virtual host on that listener if the guest supplies another Host/SNI. Acceptable for disposable guests + explicit allowlist.
 
-**DNS is not authorization:** resolving a name (or guessing an IP) does not grant access. Firewall rules remain the boundary.
+**DNS is not authorization:** resolving a name does not grant access. Firewall rules remain the boundary.
 
 ## Modules and units
 
 | Path | Role |
 |------|------|
-| `modules/ci-runner-host.nix` | Options, dirs, packages, bridge allowlist |
-| `modules/ci-runner-network.nix` | libvirt network + iptables isolation |
+| `modules/ci-runner-host.nix` | Options, multi-pool config, dirs, packages |
+| `modules/ci-runner-network.nix` | Shared libvirt network + iptables isolation |
 | `modules/ci-runner-provisioner.nix` | systemd reaper/provisioner/freshness timers |
-| `modules/ci-runner-guest.nix` | Guest image definition (stable NixOS + nix-ld) |
-| `packages/ci-runner-guest-image.nix` | qcow2 image build (guest = `nixpkgs-guest`) |
-| `packages/ci-runner-provisioner.nix` | `ci-runnerctl` |
-| `packages/ci-runner-network-lib.nix` | Pure DNS/iptables render helpers (unit-tested) |
-| `packages/ci-runner-pool.py` | Deterministic pool planner (pure; unit-tested) |
-| `tests/ci_runner_pool_test.py` | Planner unit tests (31 cases) |
-| `tests/ci_runner_network_test.py` | Network render unit tests (DNS + INPUT/FORWARD) |
-| `tests/ci_runner_guest_test.py` | Guest capability invariants (Podman/Compose/nix-ld/SSH) |
-| `fixtures/ci-runner-e2e/` | Podman + Playwright smoke fixtures for candidate validation (incl. failure-path Compose cleanup proof) |
+| `modules/ci-runner-guest.nix` | Guest image (stable NixOS + nix-ld + gh + Podman) |
+| `packages/ci-runner-guest-image.nix` | qcow2 image build |
+| `packages/ci-runner-provisioner.nix` | `ci-runnerctl` + baked `pools.json` |
+| `packages/ci-runner-network-lib.nix` | Pure DNS/iptables render helpers |
+| `packages/ci-runner-pool.py` | Deterministic multi-pool planner (unit-tested) |
+| `tests/ci_runner_pool_test.py` | Planner unit tests (incl. host capacity / pool separation) |
+| `tests/ci_runner_network_test.py` | Network render unit tests |
+| `tests/ci_runner_guest_test.py` | Guest capability invariants |
+| `fixtures/ci-runner-e2e/` | Podman / Playwright / Cursor CLI smokes |
 
-**systemd:**
+**systemd** (single reconciler for all pools — one `flock`, no cross-pool races):
 
 - `ci-runner-libvirt-network.service`
-- `ci-runner-reaper.service` (boot: `reap-boot`, destroys all leftover production CI guests)
+- `ci-runner-reaper.service` (boot: `reap-boot`, destroys leftover production guests in **all** pools)
 - `ci-runner-reaper-soft.service` (periodic: `reap`, never kills running guests)
 - `ci-runner-provisioner.service` (+ timer every **30s**)
-- `ci-runner-freshness.service` (+ timer, every 12h: runner-version freshness metrics)
+- `ci-runner-freshness.service` (+ timer, every 12h)
 - timers: `ci-runner-reaper.timer`, `ci-runner-provisioner.timer`, `ci-runner-freshness.timer`
 
 **Storage:** `/data/ci/{base,overlays,seeds,state,logs}`
@@ -108,33 +138,69 @@ services.ciRunner = {
 |------|------|
 | `/data/ci/base/current.qcow2` | Symlink to the immutable base used for **new** guests |
 | `/data/ci/state/provision.lock` | `flock` around full reconcile / status / validate |
-| `/data/ci/state/guests/<name>.env` | Per-guest state (base pin, overlay, serial, …) |
-| `/data/ci/state/pool.json` | Last planner output |
+| `/data/ci/state/guests/<name>.env` | Per-guest state (base pin, overlay, pool id, …) |
+| `/data/ci/state/host-pools.json` | Last multi-pool planner output |
+| `/data/ci/state/pool.json` | CI subset (legacy consumers) |
 | `/data/ci/logs/<name>.serial.log` | Guest serial console |
 
 **Domain prefixes:**
 
 | Prefix | Managed by production reaper/reconciler? |
 |--------|------------------------------------------|
-| `ci-ephemeral-*` | Yes — production pool only |
-| `ci-candidate-*` | **Never** — candidate validation namespace |
+| `ci-ephemeral-*` | Yes — CI pool |
+| `agent-ephemeral-*` | Yes — agent pool |
+| `ci-candidate-*` | **Never** — CI candidate validation |
+| `agent-candidate-*` | **Never** — agent candidate validation |
 
-## Idle pool model
+## Capacity model (host-wide)
 
-The platform keeps a small pool of disposable guests and replenishes idle capacity when runners become busy. Scaling is **gradual** (timer-driven polling). There are **no** workflow_job webhooks, no Actions Runner Controller (ARC), no Kubernetes, and no queue-depth scaling.
+Independent pools must not each consume a full per-pool max and oversubscribe the host.
 
-### Capacity options
+| Option | Live value | Meaning |
+|--------|------------|---------|
+| `hostMaxGuests` | **3** | Dual meaning (same number by design): (1) hard ceiling on **production** guests across all pools; (2) default **physical** safety ceiling for any runner-like VM including candidates |
+| CI `maxGuests` | 3 | Per-pool cap (still subject to host ceiling) |
+| CI `desiredIdleCapacity` | 1 | Keep one online idle CI spare when capacity allows |
+| CI `reservedHostSlots` | **2** | Lower-priority pools may not *consume capacity that would leave CI below this floor* when allocating **new** guests |
+| CI `priority` | 100 | Higher priority when allocating **new** provisions under host contention |
+| Agent `maxGuests` | 1 | At most one agent guest (Developer/Reviewer are sequential) |
+| Agent `desiredIdleCapacity` | 1 | One always-idle agent spare (polling demand model) |
+| Agent `priority` | 50 | Lower priority for **new** provisions under host contention |
+| Guest RAM / vCPU (both pools) | 4096 MiB / 2 | Same disposable image sizing |
 
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `services.ciRunner.desiredIdleCapacity` | `1` | Target number of healthy online idle runners (`busy=false`). Formerly `desiredCleanCapacity`. |
-| `services.ciRunner.maxGuests` | **`3`** (module / live host) | Hard cap on **all** managed production guests: provisioning + idle + busy + shutting_down + uncertain. Architectural ceiling in the planner/tests is **10**; the live host default is evidence-based and lower. |
+**`priority` is not preemption.** It only affects how free host slots are assigned to *new* provisions. An already-running idle agent is **not** automatically destroyed because CI wants a third guest. The CI floor guarantee is: under the reservation model, the agent pool cannot *consume* capacity required to preserve two host slots for CI (agent max effective occupancy is `hostMaxGuests − reservedHostSlots = 1`). That is sufficient for Developer → CI → Reviewer.
 
-**Invariant:** always try to keep `desiredIdleCapacity` idle. When an idle guest becomes busy, provision a replacement subject to `maxGuests`. Guests already in `provisioning` count toward the idle supply (avoids double-provision while a guest is still booting/registering).
+**Creation-site guards (defense in depth):** `ci-runnerctl provision` and reconcile both call `provision_one`, which refuses under the shared `flock` if creating one more production guest would exceed per-pool `maxGuests`, production `hostMaxGuests`, or the physical ceiling (production + candidates). Planner arithmetic alone is not trusted.
 
-**Live host sizing (measured 2026-08-09):** Intel i3-14100 (8 threads), 62 GiB RAM, ~20 GiB MemAvailable with swap 2 GiB full; Home Assistant VM 4 GiB / 2 vCPU; CI guests 4 GiB / 2 vCPU; dense Podman homelab. Theoretical `10 × 4 GiB = 40 GiB` guest RAM is **not** safe at current sizing — use `maxGuests = 3` on this host. Raise only after re-checking MemAvailable and vCPU headroom (and prefer right-sizing guest RAM before chasing the architectural ceiling).
+**CI starvation answer:** with `reservedHostSlots = 2` and `hostMaxGuests = 3`, a busy agent occupies at most one host slot. At least two host slots remain available for CI. A long-running Developer/Reviewer agent therefore **cannot** reduce CI below its protected two-slot floor under this model. When the host is already full of CI guests (3), the agent waits — that is intentional (CI priority for *new* slots), not CI starvation.
 
-Live `configuration.nix` sets `desiredIdleCapacity = 1` and `maxGuests = 3`.
+**Live host evidence (2026-08-15):** Intel i3-14100 (8 threads), 62 GiB RAM, ~12–13 GiB MemAvailable with swap 2 GiB often full while 3×4 GiB CI guests + HA (4 GiB) + dense Podman run. Raising `hostMaxGuests` above 3 is unsafe without right-sizing. Do not increase capacity merely to avoid this design.
+
+### Candidate physical admission
+
+Candidates (`*-candidate-*`) are excluded from production reconciliation (correct for lifecycle ownership) but still consume RAM/vCPU. By default `validate-candidate` **refuses** to start if `production + existing candidates + 1 > hostMaxGuests`.
+
+```bash
+# Fail-closed (default)
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 --pool agent
+
+# Explicit operator bypass (conspicuous warning; not for normal automation)
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 --pool agent \
+  --allow-capacity-overcommit
+```
+
+Candidate admission and production provision share `provision.lock`, so two concurrent operations cannot both observe one free slot and overcommit.
+
+### Idle / demand strategy (agent)
+
+The platform is polling-based (no `workflow_job` webhooks, no ARC, no Kubernetes).
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| `desiredIdleCapacity = 0` | No warm RAM cost | Queued agent jobs never start without another demand signal |
+| `desiredIdleCapacity = 1` | Reliable first version; agent job starts immediately | One warm 4 GiB guest while unused; reduces CI burst headroom while warm |
+
+**Chosen:** agent `desiredIdleCapacity = 1` — simplest reliable architecture consistent with safe host capacity and CI reservation. Quiet steady state is typically 1 CI idle + 1 agent idle (= 2 of 3 host slots). Under CI load of 3, the agent spare is deferred until a slot frees.
 
 ### Authority and fail-closed behaviour
 
@@ -282,15 +348,39 @@ picks up a job.
 - `githubRepo` is the bare repo name (no `owner/` prefix).
 - Do **not** commit private keys or tokens.
 
-## Runner label
-
-Consuming workflows should target:
+## Runner labels
 
 ```yaml
+# PR / push CI
 runs-on: [self-hosted, Linux, X64, nixos-ephemeral-ci]
+
+# Shopforge Developer / Reviewer agents (workflows not in this repo)
+runs-on: [self-hosted, Linux, X64, nixos-ephemeral-agent]
 ```
 
+If a job stays queued, check which label it requested:
+
+| Symptom | Likely cause |
+|---------|--------------|
+| Queued on `nixos-ephemeral-ci`, `ci_runner_saturated 1` / `runner_pool_saturated{pool="ci"} 1` | CI pool at capacity (or host full of CI) |
+| Queued on `nixos-ephemeral-agent`, host full / agent busy | Agent max=1 already occupied, or host at `hostMaxGuests` with CI priority holding slots |
+| Queued forever, `runner_pool_github_ok 0` | GitHub App / API outage (fail-closed) |
+
 This repository does not own application workflow YAML.
+
+## Cursor CLI (agent guests)
+
+**Decision:** Cursor CLI is **not** baked into the guest image. Consuming workflows install a **pinned** lab build from the official downloads URL scheme documented by Cursor (`https://downloads.cursor.com/lab/<version>/linux/x64/agent-cli-package.tar.gz`). That keeps an auditable version boundary in the application repo and avoids an unpinned `curl \| bash` dependency in NixOS.
+
+Guest prerequisites for that install:
+
+- `curl`, `cacert`, `bash`, writable `$HOME`
+- `programs.nix-ld` for dynamically linked CLI binaries
+- `git`, `gh` on PATH (agent workflows that push branches / open PRs)
+
+Platform smoke: `fixtures/ci-runner-e2e/cursor-cli-smoke.sh` (version/help only; no autonomous agent).
+
+`CURSOR_API_KEY` remains a GitHub Actions job secret only.
 
 ## NixOS base
 
@@ -603,24 +693,25 @@ the accepted live evidence.
 ```bash
 sudo ci-runnerctl status
 sudo ci-runnerctl metrics
-sudo ci-runnerctl freshness           # baked runner vs latest GitHub release (observe-only)
-sudo ci-runnerctl github-check        # App creds/permissions (registers nothing)
-sudo ci-runnerctl reap                # soft: non-running production guests only
-sudo ci-runnerctl reap-boot           # fail-closed: destroy all production CI guests
-sudo ci-runnerctl reconcile           # plan + destroy stale + restore idle capacity
-sudo ci-runnerctl provision           # provision one ephemeral runner guest (GitHub enabled)
-sudo ci-runnerctl dummy               # isolation proof without GitHub (production prefix)
-sudo ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]
+sudo ci-runnerctl freshness
+sudo ci-runnerctl github-check
+sudo ci-runnerctl reap
+sudo ci-runnerctl reap-boot
+sudo ci-runnerctl reconcile
+sudo ci-runnerctl provision [ci|agent]
+sudo ci-runnerctl dummy
+sudo ci-runnerctl validate-candidate <qcow2> [--pool ci|agent] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]
 sudo ci-runnerctl install-base <qcow2>
-sudo ci-runnerctl recycle-idle
+sudo ci-runnerctl recycle-idle [ci|agent]
 sudo ci-runnerctl build-hint
-sudo ci-runnerctl destroy <domain>    # ci-ephemeral-* or ci-candidate-* only
-sudo ci-runnerctl destroy-all         # production prefix only (never candidates)
+sudo ci-runnerctl destroy <domain>    # any managed prod/candidate prefix
+sudo ci-runnerctl destroy-all         # all production prefixes (never candidates)
 journalctl -u ci-runner-provisioner -u ci-runner-reaper -u ci-runner-freshness -t ci-runnerctl -f
 virsh list --all
 virsh net-info ci-net
-virsh net-dumpxml ci-net              # inspect <dns> static hosts + forwarders
 ```
+
+`status` prints **host capacity** plus a block per pool (CI and agent). Metrics include legacy `ci_runner_*` gauges plus labelled `runner_pool_*{pool=…}` and `runner_host_*`.
 
 ### Troubleshooting internal HTTPS from CI
 

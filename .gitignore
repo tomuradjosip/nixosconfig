@@ -7,3 +7,6 @@ result
 # Python bytecode from local unit tests
 **/__pycache__/
 *.py[cod]
+
+# nix build -o result-*
+result-*

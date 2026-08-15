@@ -12,6 +12,7 @@ LABEL=@runnerLabel@
 RUNNER_VERSION=@runnerVersion@
 DESIRED=@desiredIdleCapacity@
 MAX_GUESTS=@maxGuests@
+HOST_MAX_GUESTS=@hostMaxGuests@
 MEM=@guestMemoryMiB@
 VCPUS=@guestVcpus@
 LAN_PROBE=@lanProbeTarget@
@@ -25,12 +26,14 @@ GH_INST_ID=@githubInstallationId@
 GH_KEY=@githubPrivateKeyFile@
 TEXTFILE_DIR=@textfileDir@
 PROVISIONING_GRACE_SEC=@provisioningGraceSec@
+POOLS_JSON=@poolsJson@
 BASE_LINK="$DATA_DIR/base/current.qcow2"
 STATE_DIR="$DATA_DIR/state"
 GUEST_STATE_DIR="$STATE_DIR/guests"
 LOCK_FILE="$STATE_DIR/provision.lock"
 STATUS_FILE="$STATE_DIR/status.env"
 POOL_FILE="$STATE_DIR/pool.json"
+HOST_POOL_FILE="$STATE_DIR/host-pools.json"
 METRICS_FILE="$TEXTFILE_DIR/ci_runner.prom"
 FRESHNESS_FILE="$TEXTFILE_DIR/ci_runner_freshness.prom"
 TOKEN_CACHE="$STATE_DIR/github_installation_token"
@@ -41,6 +44,147 @@ GH_APP_TOKEN_BIN=@ghAppTokenBin@
 export PATH=@path@:$PATH
 
 log() { echo "ci-runnerctl: $*" >&2; logger -t ci-runnerctl "$*" 2>/dev/null || true; }
+
+# --- Multi-pool helpers ---------------------------------------------------
+
+pool_ids() {
+  jq -r '.pools[].id' "$POOLS_JSON"
+}
+
+pool_json() {
+  local id="$1"
+  jq -c --arg id "$id" '.pools[] | select(.id==$id)' "$POOLS_JSON"
+}
+
+pool_field() {
+  local id="$1" field="$2"
+  pool_json "$id" | jq -r --arg f "$field" '.[$f]'
+}
+
+all_prod_prefixes() {
+  jq -r '.pools[].prefix' "$POOLS_JSON"
+}
+
+all_cand_prefixes() {
+  jq -r '.pools[].candidate_prefix' "$POOLS_JSON"
+}
+
+is_managed_domain() {
+  local name="$1" pfx
+  for pfx in $(all_prod_prefixes) $(all_cand_prefixes); do
+    [[ -n "$pfx" ]] || continue
+    case "$name" in
+      "${pfx}"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+pool_id_for_domain() {
+  local name="$1" id pfx
+  for id in $(pool_ids); do
+    pfx=$(pool_field "$id" prefix)
+    case "$name" in
+      "${pfx}"*) echo "$id"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+list_pool_domains() {
+  local id="$1"
+  list_prefixed_domains "$(pool_field "$id" prefix)"
+}
+
+list_all_prod_domains() {
+  local id
+  for id in $(pool_ids); do
+    list_pool_domains "$id"
+  done
+}
+
+list_all_candidate_domains() {
+  local pfx
+  for pfx in $(all_cand_prefixes); do
+    [[ -n "$pfx" ]] || continue
+    list_prefixed_domains "$pfx"
+  done
+}
+
+domain_names_json() {
+  # Emit JSON array of {name} objects from newline-separated domain names on stdin.
+  jq -Rnc '[inputs | select(length>0) | {name: .}]'
+}
+
+admit_production_or_refuse() {
+  # Final host/pool capacity guard before creating a production guest. Must run under flock.
+  local pool_id="$1"
+  local pfx maxg domains snap decision reason
+  pfx=$(pool_field "$pool_id" prefix)
+  maxg=$(pool_field "$pool_id" max_guests)
+  domains=$( {
+    list_all_prod_domains
+    list_all_candidate_domains
+  } | domain_names_json )
+  snap=$(jq -nc \
+    --argjson host_max "$HOST_MAX_GUESTS" \
+    --argjson pool_max "$maxg" \
+    --arg pfx "$pfx" \
+    --argjson domains "$domains" \
+    --slurpfile poolsfile "$POOLS_JSON" \
+    '{
+      host_max_guests: $host_max,
+      pool_max_guests: $pool_max,
+      pool_prefix: $pfx,
+      production_prefixes: [$poolsfile[0].pools[].prefix],
+      candidate_prefixes: [$poolsfile[0].pools[].candidate_prefix],
+      domains: $domains
+    }')
+  decision=$(echo "$snap" | "$POOL_BIN" admit-production)
+  if [[ "$(echo "$decision" | jq -r '.allowed')" != "true" ]]; then
+    reason=$(echo "$decision" | jq -r '.reason')
+    log "refusing production provision pool=$pool_id reason=$reason $(echo "$decision" | jq -c '{pool_total,production_total,physical_total,host_max,pool_max}')"
+    return 1
+  fi
+  return 0
+}
+
+admit_candidate_or_refuse() {
+  # Physical safety guard before starting a candidate. Must run under flock.
+  local allow_overcommit="${1:-0}"
+  local domains snap decision reason
+  domains=$( {
+    list_all_prod_domains
+    list_all_candidate_domains
+  } | domain_names_json )
+  snap=$(jq -nc \
+    --argjson physical_max "$HOST_MAX_GUESTS" \
+    --argjson overcommit "$([[ "$allow_overcommit" == "1" ]] && echo true || echo false)" \
+    --argjson domains "$domains" \
+    --slurpfile poolsfile "$POOLS_JSON" \
+    '{
+      physical_max_guests: $physical_max,
+      allow_overcommit: $overcommit,
+      production_prefixes: [$poolsfile[0].pools[].prefix],
+      candidate_prefixes: [$poolsfile[0].pools[].candidate_prefix],
+      domains: $domains
+    }')
+  decision=$(echo "$snap" | "$POOL_BIN" admit-candidate)
+  if [[ "$(echo "$decision" | jq -r '.allowed')" != "true" ]]; then
+    reason=$(echo "$decision" | jq -r '.reason')
+    log "refusing candidate start reason=$reason $(echo "$decision" | jq -c '{production_total,candidate_total,physical_total,physical_max}')"
+    echo "FAIL: candidate would exceed physical guest ceiling (hostMaxGuests=$HOST_MAX_GUESTS includes production + candidates)."
+    echo "      Occupancy: $(echo "$decision" | jq -c '{production_total,candidate_total,physical_total,physical_max}')"
+    echo "      Retry when a slot is free, or pass --allow-capacity-overcommit (explicit, warned bypass)."
+    return 1
+  fi
+  if [[ "$(echo "$decision" | jq -r '.reason')" == "overcommit_override" ]]; then
+    log "WARNING: candidate capacity overcommit override in effect — bypassing physical safety ceiling"
+    echo "WARNING: --allow-capacity-overcommit bypasses the physical guest safety ceiling (hostMaxGuests=$HOST_MAX_GUESTS)."
+    echo "         This can oversubscribe RAM/vCPU on the live host. Do not use for normal automation."
+  fi
+  return 0
+}
 
 ensure_dirs() {
   mkdir -p "$DATA_DIR/base" "$DATA_DIR/overlays" "$DATA_DIR/seeds" "$DATA_DIR/state" \
@@ -158,13 +302,10 @@ guest_count() {
 
 destroy_guest() {
   local name="$1"
-  case "$name" in
-    "${PREFIX}"*|"${CANDIDATE_PREFIX}"*) ;;
-    *)
-      log "refusing to destroy non-managed domain: $name"
-      return 2
-      ;;
-  esac
+  if ! is_managed_domain "$name"; then
+    log "refusing to destroy non-managed domain: $name"
+    return 2
+  fi
   log "destroying guest $name"
   virsh destroy "$name" 2>/dev/null || true
   virsh undefine "$name" --remove-all-storage 2>/dev/null \
@@ -177,73 +318,84 @@ destroy_guest() {
 }
 
 reap_orphans() {
-  # mode=boot → destroy every production CI guest (post-reboot / fail-closed)
+  # mode=boot → destroy every production guest across all pools (post-reboot / fail-closed)
   # mode=soft → destroy only non-running production guests + orphan disks
-  # Candidate (ci-candidate-*) resources are NEVER touched by production reaping.
+  # Candidate (*-candidate-*) resources are NEVER touched by production reaping.
   local mode="${1:-soft}"
-  log "reaping stale CI resources mode=$mode prefix=$PREFIX"
-  local cleaned=0 d state
-  for d in $(list_ci_domains); do
-    state=$(virsh domstate "$d" 2>/dev/null | tr -d '[:space:]' || echo missing)
-    if [[ "$mode" == "boot" ]]; then
-      log "reaper(boot): removing domain $d (state=$state)"
-      destroy_guest "$d"
-      cleaned=$((cleaned + 1))
-    else
-      case "$state" in
-        running)
-          log "reaper(soft): leaving running guest $d"
-          ;;
-        *)
-          log "reaper(soft): removing non-running domain $d (state=$state)"
-          destroy_guest "$d"
-          cleaned=$((cleaned + 1))
-          ;;
-      esac
-    fi
+  log "reaping stale runner resources mode=$mode pools=$(pool_ids | tr '\n' ',')"
+  local cleaned=0 d state id pfx
+  for id in $(pool_ids); do
+    pfx=$(pool_field "$id" prefix)
+    for d in $(list_prefixed_domains "$pfx"); do
+      state=$(virsh domstate "$d" 2>/dev/null | tr -d '[:space:]' || echo missing)
+      if [[ "$mode" == "boot" ]]; then
+        log "reaper(boot): removing domain $d pool=$id (state=$state)"
+        destroy_guest "$d"
+        cleaned=$((cleaned + 1))
+      else
+        case "$state" in
+          running)
+            log "reaper(soft): leaving running guest $d"
+            ;;
+          *)
+            log "reaper(soft): removing non-running domain $d pool=$id (state=$state)"
+            destroy_guest "$d"
+            cleaned=$((cleaned + 1))
+            ;;
+        esac
+      fi
+    done
   done
   local f base
   if [[ -d "$DATA_DIR/overlays" ]]; then
-    for f in "$DATA_DIR/overlays"/${PREFIX}*.qcow2; do
-      [[ -e "$f" ]] || continue
-      base=$(basename "$f" .qcow2)
-      if ! virsh dominfo "$base" >/dev/null 2>&1; then
-        log "reaper: removing orphan overlay $f"
-        rm -f "$f"
-        cleaned=$((cleaned + 1))
-      fi
+    for id in $(pool_ids); do
+      pfx=$(pool_field "$id" prefix)
+      for f in "$DATA_DIR/overlays"/${pfx}*.qcow2; do
+        [[ -e "$f" ]] || continue
+        base=$(basename "$f" .qcow2)
+        if ! virsh dominfo "$base" >/dev/null 2>&1; then
+          log "reaper: removing orphan overlay $f"
+          rm -f "$f"
+          cleaned=$((cleaned + 1))
+        fi
+      done
     done
   fi
   if [[ -d "$DATA_DIR/seeds" ]]; then
-    for f in "$DATA_DIR/seeds"/${PREFIX}*.iso; do
-      [[ -e "$f" ]] || continue
-      base=$(basename "$f" .iso)
-      if ! virsh dominfo "$base" >/dev/null 2>&1; then
-        log "reaper: removing orphan seed $f"
-        rm -f "$f"
-        cleaned=$((cleaned + 1))
-      fi
-    done
-    for f in "$DATA_DIR/seeds"/${PREFIX}*.dir; do
-      [[ -d "$f" ]] || continue
-      base=$(basename "$f" .dir)
-      if ! virsh dominfo "$base" >/dev/null 2>&1; then
-        log "reaper: removing orphan seed dir $f"
-        rm -rf "$f"
-        cleaned=$((cleaned + 1))
-      fi
+    for id in $(pool_ids); do
+      pfx=$(pool_field "$id" prefix)
+      for f in "$DATA_DIR/seeds"/${pfx}*.iso; do
+        [[ -e "$f" ]] || continue
+        base=$(basename "$f" .iso)
+        if ! virsh dominfo "$base" >/dev/null 2>&1; then
+          log "reaper: removing orphan seed $f"
+          rm -f "$f"
+          cleaned=$((cleaned + 1))
+        fi
+      done
+      for f in "$DATA_DIR/seeds"/${pfx}*.dir; do
+        [[ -d "$f" ]] || continue
+        base=$(basename "$f" .dir)
+        if ! virsh dominfo "$base" >/dev/null 2>&1; then
+          log "reaper: removing orphan seed dir $f"
+          rm -rf "$f"
+          cleaned=$((cleaned + 1))
+        fi
+      done
     done
   fi
-  # Orphan per-guest state files
   if [[ -d "$GUEST_STATE_DIR" ]]; then
-    for f in "$GUEST_STATE_DIR"/${PREFIX}*.env; do
-      [[ -e "$f" ]] || continue
-      base=$(basename "$f" .env)
-      if ! virsh dominfo "$base" >/dev/null 2>&1; then
-        log "reaper: removing orphan guest state $f"
-        rm -f "$f"
-        cleaned=$((cleaned + 1))
-      fi
+    for id in $(pool_ids); do
+      pfx=$(pool_field "$id" prefix)
+      for f in "$GUEST_STATE_DIR"/${pfx}*.env; do
+        [[ -e "$f" ]] || continue
+        base=$(basename "$f" .env)
+        if ! virsh dominfo "$base" >/dev/null 2>&1; then
+          log "reaper: removing orphan guest state $f"
+          rm -f "$f"
+          cleaned=$((cleaned + 1))
+        fi
+      done
     done
   fi
   if [[ "$cleaned" -gt 0 ]]; then
@@ -262,6 +414,7 @@ make_seed_iso() {
   local seed_iso="$DATA_DIR/seeds/${name}.iso"
   # Optional 5th arg (dummy) or ignored: space-separated HTTPS probe URLs.
   local probe_urls="${PROBE_URLS_OVERRIDE:-${VALIDATION_URLS:-}}"
+  local runner_labels="${RUNNER_LABELS_OVERRIDE:-$LABEL,self-hosted,Linux,X64}"
   mkdir -p "$DATA_DIR/seeds"
   rm -rf "$seed_dir"
   mkdir -p "$seed_dir"
@@ -271,11 +424,14 @@ make_seed_iso() {
     if [[ -n "$probe_urls" ]]; then
       echo "PROBE_URLS=$probe_urls"
     fi
+    if [[ -n "${CURSOR_CLI_VERSION:-}" ]]; then
+      echo "CURSOR_CLI_VERSION=$CURSOR_CLI_VERSION"
+    fi
     if [[ "$mode" == "runner" ]]; then
       echo "REPO_URL=$3"
       echo "REGISTRATION_TOKEN=$4"
       echo "RUNNER_NAME=$name"
-      echo "RUNNER_LABELS=$LABEL,self-hosted,Linux,X64"
+      echo "RUNNER_LABELS=$runner_labels"
     fi
   } >"$seed_dir/ci-seed.env"
   chmod 0600 "$seed_dir/ci-seed.env"
@@ -300,6 +456,8 @@ define_and_start() {
   local name="$1"
   local overlay="$2"
   local seed_iso="$3"
+  local mem_mib="${4:-$MEM}"
+  local vcpus="${5:-$VCPUS}"
   local serial_log="$DATA_DIR/logs/${name}.serial.log"
   mkdir -p "$DATA_DIR/logs"
   : >"$serial_log"
@@ -308,8 +466,8 @@ define_and_start() {
   virt-install \
     --connect qemu:///system \
     --name "$name" \
-    --memory "$MEM" \
-    --vcpus "$VCPUS" \
+    --memory "$mem_mib" \
+    --vcpus "$vcpus" \
     --cpu host-model \
     --import \
     --disk "path=$overlay,format=qcow2,bus=virtio" \
@@ -555,69 +713,71 @@ collect_domain_snapshot_json() {
 }
 
 plan_pool() {
-  # Build snapshot, invoke pure planner, write POOL_FILE, print plan JSON on stdout.
-  local github_ok=false runners='[]' domains now snap plan
+  # Multi-pool host plan. Writes HOST_POOL_FILE and legacy POOL_FILE (ci subset).
+  local now domains snap plan id owner repo runners github_ok
+  local runners_by_pool='{}' github_ok_by_pool='{}'
   now=$(date +%s)
   domains=$(collect_domain_snapshot_json)
-  if [[ "$GH_ENABLE" == "1" ]]; then
-    if runners=$(list_github_runners_json "$GH_OWNER" "$GH_REPO" 2>/dev/null); then
-      github_ok=true
+
+  for id in $(pool_ids); do
+    github_ok=false
+    runners='[]'
+    owner=$(pool_field "$id" github_owner)
+    repo=$(pool_field "$id" github_repo)
+    if [[ "$(pool_field "$id" github_enable)" == "true" ]]; then
+      if runners=$(list_github_runners_json "$owner" "$repo" 2>/dev/null); then
+        github_ok=true
+      else
+        log "GitHub API unavailable for pool=$id ($owner/$repo) — fail-closed"
+        runners='[]'
+        github_ok=false
+      fi
     else
-      log "GitHub API unavailable — fail-closed (no overprovision, retain running guests)"
-      runners='[]'
+      log "GitHub disabled for pool=$id; will not provision"
       github_ok=false
     fi
-  else
-    log "GitHub disabled; pool plan will not provision"
-    github_ok=false
-  fi
-  # Normalize runners to the fields the planner needs.
-  runners=$(echo "$runners" | jq -c '[.[] | {name, status, busy: (.busy // false)}]')
+    runners=$(echo "$runners" | jq -c '[.[] | {name, status, busy: (.busy // false)}]')
+    runners_by_pool=$(jq -nc --argjson cur "$runners_by_pool" --arg id "$id" --argjson r "$runners" \
+      '$cur + {($id): $r}')
+    github_ok_by_pool=$(jq -nc --argjson cur "$github_ok_by_pool" --arg id "$id" --argjson ok "$github_ok" \
+      '$cur + {($id): $ok}')
+  done
+
   snap=$(jq -nc \
     --argjson domains "$domains" \
-    --argjson runners "$runners" \
-    --argjson github_ok "$github_ok" \
+    --argjson runners_by_pool "$runners_by_pool" \
+    --argjson github_ok_by_pool "$github_ok_by_pool" \
     --argjson now "$now" \
-    --arg prefix "$PREFIX" \
-    --arg cprefix "$CANDIDATE_PREFIX" \
-    --argjson desired "$DESIRED" \
-    --argjson maxg "$MAX_GUESTS" \
+    --argjson host_max "$HOST_MAX_GUESTS" \
     --argjson grace "$PROVISIONING_GRACE_SEC" \
+    --slurpfile poolsfile "$POOLS_JSON" \
     '{
-      config: {
-        prefix: $prefix,
-        candidate_prefix: $cprefix,
-        desired_idle: $desired,
-        max_guests: $maxg,
-        provisioning_grace_sec: $grace
-      },
+      mode: "multi",
+      host: {host_max_guests: $host_max},
+      pools: ($poolsfile[0].pools | map(. + {provisioning_grace_sec: $grace})),
       now: $now,
-      github_ok: $github_ok,
       domains: $domains,
-      github_runners: $runners
+      runners_by_pool: $runners_by_pool,
+      github_ok_by_pool: $github_ok_by_pool
     }')
   plan=$(echo "$snap" | "$POOL_BIN" plan)
-  echo "$plan" >"$POOL_FILE.tmp"
+  echo "$plan" >"$HOST_POOL_FILE.tmp"
+  mv -f "$HOST_POOL_FILE.tmp" "$HOST_POOL_FILE"
+  # Legacy single-pool file: CI subset when present, else first pool.
+  if echo "$plan" | jq -e '.pools.ci' >/dev/null 2>&1; then
+    echo "$plan" | jq '.pools.ci' >"$POOL_FILE.tmp"
+  else
+    echo "$plan" | jq '.pools | to_entries[0].value' >"$POOL_FILE.tmp"
+  fi
   mv -f "$POOL_FILE.tmp" "$POOL_FILE"
   echo "$plan"
 }
 
 write_metrics() {
   mkdir -p "$TEXTFILE_DIR"
-  local idle=0 busy=0 provisioning=0 uncertain=0 total=0 saturated=0 github_ok=0
+  local plan='{}'
+  [[ -f "$HOST_POOL_FILE" ]] && plan=$(cat "$HOST_POOL_FILE")
   local overlay_bytes=0
-  if [[ -f "$POOL_FILE" ]]; then
-    idle=$(jq -r '.counts.idle // 0' "$POOL_FILE")
-    busy=$(jq -r '.counts.busy // 0' "$POOL_FILE")
-    provisioning=$(jq -r '.counts.provisioning // 0' "$POOL_FILE")
-    uncertain=$(jq -r '.counts.uncertain // 0' "$POOL_FILE")
-    total=$(jq -r '.counts.total // 0' "$POOL_FILE")
-    saturated=$(jq -r 'if .saturated then 1 else 0 end' "$POOL_FILE")
-    github_ok=$(jq -r 'if .github_ok then 1 else 0 end' "$POOL_FILE")
-  else
-    # Fallback: count live production domains only.
-    total=$(guest_count)
-  fi
   if [[ -d "$DATA_DIR/overlays" ]]; then
     overlay_bytes=$(du -sb "$DATA_DIR/overlays" 2>/dev/null | awk '{print $1}')
   fi
@@ -626,42 +786,108 @@ write_metrics() {
   [[ -f "$STATE_DIR/provision_failures" ]] && provision_fail=$(cat "$STATE_DIR/provision_failures")
   [[ -f "$STATE_DIR/teardown_failures" ]] && teardown_fail=$(cat "$STATE_DIR/teardown_failures")
   [[ -f "$STATE_DIR/orphan_cleanup" ]] && orphan_clean=$(cat "$STATE_DIR/orphan_cleanup")
+
+  local host_total host_max host_sat
+  host_total=$(echo "$plan" | jq -r '.host_total // 0')
+  host_max=$(echo "$plan" | jq -r ".host_max // $HOST_MAX_GUESTS")
+  host_sat=$(echo "$plan" | jq -r 'if .host_saturated then 1 else 0 end')
+
   local tmp="$METRICS_FILE.$$.tmp"
   {
-    echo '# HELP ci_runner_idle Healthy online managed runners with busy=false (GitHub-authoritative).'
+    echo '# HELP runner_host_total Managed production guests across all pools (after planned destroys).'
+    echo '# TYPE runner_host_total gauge'
+    echo "runner_host_total $host_total"
+    echo '# HELP runner_host_max_guests Host-wide hard ceiling on managed production guests.'
+    echo '# TYPE runner_host_max_guests gauge'
+    echo "runner_host_max_guests $host_max"
+    echo '# HELP runner_host_saturated 1 when host_total_after_provision >= host_max.'
+    echo '# TYPE runner_host_saturated gauge'
+    echo "runner_host_saturated $host_sat"
+
+    local id idle busy provisioning uncertain total saturated github_ok desired maxg
+    for id in $(pool_ids); do
+      idle=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.idle // 0')
+      busy=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.busy // 0')
+      provisioning=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.provisioning // 0')
+      uncertain=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.uncertain // 0')
+      total=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.total // 0')
+      saturated=$(echo "$plan" | jq -r --arg id "$id" 'if .pools[$id].saturated then 1 else 0 end')
+      github_ok=$(echo "$plan" | jq -r --arg id "$id" 'if .pools[$id].github_ok then 1 else 0 end')
+      desired=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].desired_idle // 0')
+      maxg=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].max_guests // 0')
+      echo "# HELP runner_pool_idle Healthy online idle runners (pool label)."
+      echo "# TYPE runner_pool_idle gauge"
+      echo "runner_pool_idle{pool=\"$id\"} $idle"
+      echo "# HELP runner_pool_busy Healthy online busy runners (pool label)."
+      echo "# TYPE runner_pool_busy gauge"
+      echo "runner_pool_busy{pool=\"$id\"} $busy"
+      echo "# HELP runner_pool_provisioning Guests still registering (pool label)."
+      echo "# TYPE runner_pool_provisioning gauge"
+      echo "runner_pool_provisioning{pool=\"$id\"} $provisioning"
+      echo "# HELP runner_pool_uncertain Unclassifiable running guests (pool label)."
+      echo "# TYPE runner_pool_uncertain gauge"
+      echo "runner_pool_uncertain{pool=\"$id\"} $uncertain"
+      echo "# HELP runner_pool_total Managed guests counting toward pool max (pool label)."
+      echo "# TYPE runner_pool_total gauge"
+      echo "runner_pool_total{pool=\"$id\"} $total"
+      echo "# HELP runner_pool_max_guests Per-pool hard cap."
+      echo "# TYPE runner_pool_max_guests gauge"
+      echo "runner_pool_max_guests{pool=\"$id\"} $maxg"
+      echo "# HELP runner_pool_desired_idle Per-pool desired idle capacity."
+      echo "# TYPE runner_pool_desired_idle gauge"
+      echo "runner_pool_desired_idle{pool=\"$id\"} $desired"
+      echo "# HELP runner_pool_saturated 1 when pool idle==0 and total>=max."
+      echo "# TYPE runner_pool_saturated gauge"
+      echo "runner_pool_saturated{pool=\"$id\"} $saturated"
+      echo "# HELP runner_pool_github_ok 1 if last plan reached GitHub for this pool."
+      echo "# TYPE runner_pool_github_ok gauge"
+      echo "runner_pool_github_ok{pool=\"$id\"} $github_ok"
+    done
+
+    # Backward-compatible unlabelled CI metrics (ci pool, or zeros).
+    local ci_idle ci_busy ci_prov ci_unc ci_total ci_sat ci_gh ci_des ci_max
+    ci_idle=$(echo "$plan" | jq -r '.pools.ci.counts.idle // 0')
+    ci_busy=$(echo "$plan" | jq -r '.pools.ci.counts.busy // 0')
+    ci_prov=$(echo "$plan" | jq -r '.pools.ci.counts.provisioning // 0')
+    ci_unc=$(echo "$plan" | jq -r '.pools.ci.counts.uncertain // 0')
+    ci_total=$(echo "$plan" | jq -r '.pools.ci.counts.total // 0')
+    ci_sat=$(echo "$plan" | jq -r 'if .pools.ci.saturated then 1 else 0 end')
+    ci_gh=$(echo "$plan" | jq -r 'if .pools.ci.github_ok then 1 else 0 end')
+    ci_des=$(echo "$plan" | jq -r ".pools.ci.desired_idle // $DESIRED")
+    ci_max=$(echo "$plan" | jq -r ".pools.ci.max_guests // $MAX_GUESTS")
+    echo '# HELP ci_runner_idle Healthy online managed runners with busy=false (CI pool; legacy).'
     echo '# TYPE ci_runner_idle gauge'
-    echo "ci_runner_idle $idle"
-    echo '# HELP ci_runner_busy Healthy online managed runners with busy=true (GitHub-authoritative).'
+    echo "ci_runner_idle $ci_idle"
+    echo '# HELP ci_runner_busy Healthy online managed runners with busy=true (CI pool; legacy).'
     echo '# TYPE ci_runner_busy gauge'
-    echo "ci_runner_busy $busy"
-    echo '# HELP ci_runner_provisioning Local running guests not yet online on GitHub (within grace).'
+    echo "ci_runner_busy $ci_busy"
+    echo '# HELP ci_runner_provisioning Local running CI guests not yet online on GitHub.'
     echo '# TYPE ci_runner_provisioning gauge'
-    echo "ci_runner_provisioning $provisioning"
-    echo '# HELP ci_runner_uncertain Running managed guests that cannot be safely classified.'
+    echo "ci_runner_provisioning $ci_prov"
+    echo '# HELP ci_runner_uncertain Running CI guests that cannot be safely classified.'
     echo '# TYPE ci_runner_uncertain gauge'
-    echo "ci_runner_uncertain $uncertain"
-    echo '# HELP ci_runner_total Managed production guest resources counting toward maxGuests (local libvirt-authoritative after reconcile destroys).'
+    echo "ci_runner_uncertain $ci_unc"
+    echo '# HELP ci_runner_total Managed CI guests counting toward CI maxGuests.'
     echo '# TYPE ci_runner_total gauge'
-    echo "ci_runner_total $total"
-    echo '# HELP ci_runner_max_guests Configured hard cap on managed production guests.'
+    echo "ci_runner_total $ci_total"
+    echo '# HELP ci_runner_max_guests CI pool hard cap.'
     echo '# TYPE ci_runner_max_guests gauge'
-    echo "ci_runner_max_guests $MAX_GUESTS"
-    echo '# HELP ci_runner_desired_idle Configured desired idle capacity.'
+    echo "ci_runner_max_guests $ci_max"
+    echo '# HELP ci_runner_desired_idle CI pool desired idle capacity.'
     echo '# TYPE ci_runner_desired_idle gauge'
-    echo "ci_runner_desired_idle $DESIRED"
-    echo '# HELP ci_runner_saturated 1 when idle==0 and total>=maxGuests (platform at capacity, behaving correctly).'
+    echo "ci_runner_desired_idle $ci_des"
+    echo '# HELP ci_runner_saturated 1 when CI idle==0 and total>=maxGuests.'
     echo '# TYPE ci_runner_saturated gauge'
-    echo "ci_runner_saturated $saturated"
-    echo '# HELP ci_runner_github_ok 1 if the last pool plan successfully queried GitHub runner state.'
+    echo "ci_runner_saturated $ci_sat"
+    echo '# HELP ci_runner_github_ok 1 if the last CI pool plan successfully queried GitHub.'
     echo '# TYPE ci_runner_github_ok gauge'
-    echo "ci_runner_github_ok $github_ok"
-    # Back-compat aliases
+    echo "ci_runner_github_ok $ci_gh"
     echo '# HELP ci_runner_clean_capacity Alias of ci_runner_idle (legacy).'
     echo '# TYPE ci_runner_clean_capacity gauge'
-    echo "ci_runner_clean_capacity $idle"
-    echo '# HELP ci_runner_guest_active 1 if any managed production guest exists (legacy).'
+    echo "ci_runner_clean_capacity $ci_idle"
+    echo '# HELP ci_runner_guest_active 1 if any managed CI guest exists (legacy).'
     echo '# TYPE ci_runner_guest_active gauge'
-    echo "ci_runner_guest_active $([[ "$total" -gt 0 ]] && echo 1 || echo 0)"
+    echo "ci_runner_guest_active $([[ "$ci_total" -gt 0 ]] && echo 1 || echo 0)"
     echo '# HELP ci_runner_provision_success_timestamp Unix time of last successful provision'
     echo '# TYPE ci_runner_provision_success_timestamp gauge'
     echo "ci_runner_provision_success_timestamp $provision_ts"
@@ -674,7 +900,7 @@ write_metrics() {
     echo '# HELP ci_runner_orphan_cleanup_total Orphan resources cleaned'
     echo '# TYPE ci_runner_orphan_cleanup_total counter'
     echo "ci_runner_orphan_cleanup_total $orphan_clean"
-    echo '# HELP ci_runner_overlay_bytes Bytes used by CI overlay disks'
+    echo '# HELP ci_runner_overlay_bytes Bytes used by runner overlay disks'
     echo '# TYPE ci_runner_overlay_bytes gauge'
     echo "ci_runner_overlay_bytes ${overlay_bytes:-0}"
   } >"$tmp"
@@ -744,10 +970,18 @@ check_freshness() {
 
 provision_one() {
   local mode="${1:-runner}"
-  local owner="${2:-$GH_OWNER}"
-  local repo="${3:-$GH_REPO}"
-  local base_path="${4:-}"
-  local name_prefix="${5:-$PREFIX}"
+  local pool_id="${2:-ci}"
+  local base_path="${3:-}"
+  local name_prefix_override="${4:-}"
+
+  local owner repo label pfx mem_mib vcpus maxg count
+  owner=$(pool_field "$pool_id" github_owner)
+  repo=$(pool_field "$pool_id" github_repo)
+  label=$(pool_field "$pool_id" runner_label)
+  pfx=$(pool_field "$pool_id" prefix)
+  mem_mib=$(pool_field "$pool_id" guest_memory_mib)
+  vcpus=$(pool_field "$pool_id" guest_vcpus)
+  maxg=$(pool_field "$pool_id" max_guests)
 
   if [[ -z "$base_path" ]]; then
     require_base
@@ -755,26 +989,26 @@ provision_one() {
   fi
   [[ -f "$base_path" ]] || { log "base image not found: $base_path"; return 1; }
 
-  if [[ "$name_prefix" == "$PREFIX" ]]; then
-    local count
-    count=$(guest_count)
-    if [[ "$count" -ge "$MAX_GUESTS" ]]; then
-      log "max guests reached ($count >= $MAX_GUESTS)"
-      return 0
+  local name_prefix="${name_prefix_override:-$pfx}"
+  # Production prefix: enforce per-pool max + hostMaxGuests + physical ceiling
+  # (including candidates) at the creation site — not only in the planner.
+  if [[ "$name_prefix" == "$pfx" ]]; then
+    if ! admit_production_or_refuse "$pool_id"; then
+      return 1
     fi
   fi
 
   local name overlay seed_iso token repo_url created
   name="${name_prefix}$(date +%Y%m%d%H%M%S)-$RANDOM"
   created=$(date +%s)
-  log "provisioning $name mode=$mode base=$base_path"
+  log "provisioning $name mode=$mode pool=$pool_id base=$base_path"
 
-  # Record identity before start so a crash mid-boot still has state for the planner.
   {
     echo "NAME=$name"
     echo "UPDATED_AT=$(date -Is)"
     echo "CREATED_AT_UNIX=$created"
     echo "MODE=$mode"
+    echo "POOL_ID=$pool_id"
     base_identity "$base_path"
     echo "SERIAL_LOG=$DATA_DIR/logs/${name}.serial.log"
     echo "OVERLAY=$DATA_DIR/overlays/${name}.qcow2"
@@ -789,12 +1023,14 @@ provision_one() {
       return 1
     }
     repo_url="https://github.com/${owner}/${repo}"
+    RUNNER_LABELS_OVERRIDE="${label},self-hosted,Linux,X64"
+    export RUNNER_LABELS_OVERRIDE
     seed_iso=$(make_seed_iso "$name" runner "$repo_url" "$token")
-    unset token
+    unset token RUNNER_LABELS_OVERRIDE
   else
     seed_iso=$(make_seed_iso "$name" dummy)
   fi
-  if ! define_and_start "$name" "$overlay" "$seed_iso"; then
+  if ! define_and_start "$name" "$overlay" "$seed_iso" "$mem_mib" "$vcpus"; then
     log "failed to start $name"
     bump_counter "$STATE_DIR/provision_failures"
     destroy_guest "$name"
@@ -806,6 +1042,7 @@ provision_one() {
     echo "UPDATED_AT=$(date -Is)"
     echo "CREATED_AT_UNIX=$created"
     echo "MODE=$mode"
+    echo "POOL_ID=$pool_id"
     base_identity "$base_path"
     echo "SERIAL_LOG=$DATA_DIR/logs/${name}.serial.log"
     echo "OVERLAY=$overlay"
@@ -816,64 +1053,81 @@ provision_one() {
 }
 
 reconcile() {
-  log "reconcile start desired_idle=$DESIRED max_guests=$MAX_GUESTS"
+  log "reconcile start host_max=$HOST_MAX_GUESTS pools=$(pool_ids | tr '\n' ',')"
   ensure_dirs
-  local plan destroy_list n_destroy i name to_prov github_ok
+  local plan destroy_list name to_prov id i
   plan=$(plan_pool)
-  github_ok=$(echo "$plan" | jq -r 'if .github_ok then "true" else "false" end')
-  log "pool: idle=$(echo "$plan" | jq -r '.counts.idle') busy=$(echo "$plan" | jq -r '.counts.busy') provisioning=$(echo "$plan" | jq -r '.counts.provisioning') total=$(echo "$plan" | jq -r '.counts.total') provision=$(echo "$plan" | jq -r '.provision') github_ok=$github_ok saturated=$(echo "$plan" | jq -r '.saturated')"
+  log "host: total=$(echo "$plan" | jq -r '.host_total') max=$(echo "$plan" | jq -r '.host_max') saturated=$(echo "$plan" | jq -r '.host_saturated')"
+  for id in $(pool_ids); do
+    log "pool=$id idle=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.idle') busy=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.busy') provisioning=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.provisioning') total=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.total') provision=$(echo "$plan" | jq -r --arg id "$id" '.provision[$id] // .pools[$id].provision') github_ok=$(echo "$plan" | jq -r --arg id "$id" '.pools[$id].github_ok')"
+  done
 
-  # Apply safe destroys first (capacity reclaim).
   destroy_list=$(echo "$plan" | jq -r '.destroy[]?')
   for name in $destroy_list; do
     [[ -n "$name" ]] || continue
-    log "reconcile: destroying $name (state=$(echo "$plan" | jq -r --arg n "$name" '.classify[$n]'))"
+    log "reconcile: destroying $name"
     destroy_guest "$name" || bump_counter "$STATE_DIR/teardown_failures"
   done
 
-  if [[ "$GH_ENABLE" == "1" ]]; then
-    delete_stale_github_runners || true
-  fi
+  for id in $(pool_ids); do
+    if [[ "$(pool_field "$id" github_enable)" == "true" ]]; then
+      PREFIX=$(pool_field "$id" prefix)
+      GH_OWNER=$(pool_field "$id" github_owner)
+      GH_REPO=$(pool_field "$id" github_repo)
+      GH_ENABLE=1
+      delete_stale_github_runners || true
+    fi
+  done
+  PREFIX=@domainPrefix@
+  GH_OWNER=@githubOwner@
+  GH_REPO=@githubRepo@
+  GH_ENABLE=@githubEnable@
 
-  # Re-plan after destroys so remainingCapacity is accurate, then provision under the same lock.
   plan=$(plan_pool)
-  to_prov=$(echo "$plan" | jq -r '.provision // 0')
-  if [[ "$GH_ENABLE" != "1" ]]; then
-    log "GitHub disabled; not provisioning"
-    to_prov=0
-  fi
-  i=0
-  while [[ "$i" -lt "$to_prov" ]]; do
-    log "reconcile: provisioning replacement ($((i + 1))/$to_prov)"
-    provision_one runner || true
-    i=$((i + 1))
+  # Higher priority first (planner already ordered allocations; honor priority here too).
+  local ordered
+  ordered=$(jq -r '.pools | sort_by(-.priority) | .[].id' "$POOLS_JSON")
+  for id in $ordered; do
+    to_prov=$(echo "$plan" | jq -r --arg id "$id" '.provision[$id] // 0')
+    if [[ "$(pool_field "$id" github_enable)" != "true" ]]; then
+      to_prov=0
+    fi
+    i=0
+    while [[ "$i" -lt "$to_prov" ]]; do
+      log "reconcile: provisioning pool=$id ($((i + 1))/$to_prov)"
+      provision_one runner "$id" || true
+      i=$((i + 1))
+    done
   done
 
   plan=$(plan_pool)
   write_status pool \
-    "IDLE=$(echo "$plan" | jq -r '.counts.idle')" \
-    "BUSY=$(echo "$plan" | jq -r '.counts.busy')" \
-    "PROVISIONING=$(echo "$plan" | jq -r '.counts.provisioning')" \
-    "TOTAL=$(echo "$plan" | jq -r '.counts.total')" \
-    "SATURATED=$(echo "$plan" | jq -r '.saturated')" \
-    "GITHUB_OK=$(echo "$plan" | jq -r '.github_ok')"
+    "HOST_TOTAL=$(echo "$plan" | jq -r '.host_total')" \
+    "HOST_MAX=$(echo "$plan" | jq -r '.host_max')" \
+    "HOST_SATURATED=$(echo "$plan" | jq -r '.host_saturated')"
   write_metrics
   log "reconcile done"
 }
 
 recycle_idle() {
-  # Destroy only healthy idle production guests so they are replaced from the current base.
-  # Busy guests are left alone to finish their jobs on their pinned overlay/base.
-  log "recycle-idle start"
-  local plan name
+  # Destroy only healthy idle production guests (all pools) so they are replaced
+  # from the current base. Busy guests finish on their pinned overlay/base.
+  local pool_filter="${1:-}"
+  log "recycle-idle start filter=${pool_filter:-all}"
+  local plan name id
   plan=$(plan_pool)
-  echo "$plan" | jq -r '.classify | to_entries[] | select(.value=="idle") | .key' \
-    | while read -r name; do
-        [[ -n "$name" ]] || continue
-        log "recycle-idle: destroying idle guest $name"
-        destroy_guest "$name" || bump_counter "$STATE_DIR/teardown_failures"
-      done
-  # Reconcile will restore desired idle capacity from the new base.
+  for id in $(pool_ids); do
+    if [[ -n "$pool_filter" && "$id" != "$pool_filter" ]]; then
+      continue
+    fi
+    echo "$plan" | jq -r --arg id "$id" '
+      .pools[$id].classify // {} | to_entries[] | select(.value=="idle") | .key' \
+      | while read -r name; do
+          [[ -n "$name" ]] || continue
+          log "recycle-idle: destroying idle guest $name pool=$id"
+          destroy_guest "$name" || bump_counter "$STATE_DIR/teardown_failures"
+        done
+  done
   reconcile
 }
 
@@ -898,7 +1152,7 @@ wait_guest_poweroff() {
 
 print_status() {
   ensure_dirs
-  local plan base_resolved
+  local plan base_resolved id
   base_resolved=$(readlink -f "$BASE_LINK" 2>/dev/null || echo missing)
   echo "DATA_DIR=$DATA_DIR"
   echo "BASE_LINK=$BASE_LINK -> $base_resolved"
@@ -906,45 +1160,61 @@ print_status() {
     echo "BASE_ID=$(sha256sum "$base_resolved" | awk '{print substr($1,1,16)}')"
   fi
   echo "NETWORK=$NETWORK BRIDGE=$BRIDGE"
-  echo "GH_ENABLE=$GH_ENABLE  repo=${GH_OWNER}/${GH_REPO}"
-  echo "PREFIX=$PREFIX  CANDIDATE_PREFIX=$CANDIDATE_PREFIX"
-  # Refresh plan for operator view (under lock by caller when needed).
+  echo "HOST_MAX_GUESTS=$HOST_MAX_GUESTS"
   plan=$(plan_pool 2>/dev/null || echo '{}')
   echo
-  echo "capacity:"
-  echo "  desired idle: $DESIRED"
-  echo "  maximum:      $MAX_GUESTS"
-  echo "  total:        $(echo "$plan" | jq -r '.counts.total // 0')"
-  echo "  idle:         $(echo "$plan" | jq -r '.counts.idle // 0')"
-  echo "  busy:         $(echo "$plan" | jq -r '.counts.busy // 0')"
-  echo "  provisioning: $(echo "$plan" | jq -r '.counts.provisioning // 0')"
-  echo "  uncertain:    $(echo "$plan" | jq -r '.counts.uncertain // 0')"
-  echo "  saturated:    $(echo "$plan" | jq -r '.saturated // false')"
-  echo "  github_ok:    $(echo "$plan" | jq -r '.github_ok // false')"
-  echo
-  echo "guests:"
-  local name st base_id serial overlay
-  local any=0
-  for name in $(list_ci_domains); do
-    any=1
-    st=$(echo "$plan" | jq -r --arg n "$name" '.classify[$n] // "unknown"')
-    base_id=$(read_guest_var "$name" BASE_ID)
-    serial=$(read_guest_var "$name" SERIAL_LOG)
-    overlay=$(read_guest_var "$name" OVERLAY)
-    [[ -n "$serial" ]] || serial="$DATA_DIR/logs/${name}.serial.log"
-    [[ -n "$overlay" ]] || overlay="$DATA_DIR/overlays/${name}.qcow2"
-    printf '  %-40s  %-14s  base=%s\n' "$name" "$st" "${base_id:-unknown}"
-    printf '      overlay=%s\n' "$overlay"
-    printf '      serial=%s\n' "$serial"
+  echo "host capacity:"
+  echo "  maximum:      $(echo "$plan" | jq -r ".host_max // $HOST_MAX_GUESTS")"
+  echo "  total:        $(echo "$plan" | jq -r '.host_total // 0')"
+  echo "  after_prov:   $(echo "$plan" | jq -r '.host_total_after_provision // 0')"
+  echo "  saturated:    $(echo "$plan" | jq -r '.host_saturated // false')"
+  for id in $(pool_ids); do
+    echo
+    echo "pool $id:"
+    echo "  label:        $(pool_field "$id" runner_label)"
+    echo "  prefix:       $(pool_field "$id" prefix)"
+    echo "  repo:         $(pool_field "$id" github_owner)/$(pool_field "$id" github_repo)"
+    echo "  github:       $(pool_field "$id" github_enable)"
+    echo "  desired idle: $(pool_field "$id" desired_idle)"
+    echo "  max guests:   $(pool_field "$id" max_guests)"
+    echo "  reserved:     $(pool_field "$id" reserved_host_slots)"
+    echo "  priority:     $(pool_field "$id" priority)"
+    echo "  total:        $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.total // 0')"
+    echo "  idle:         $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.idle // 0')"
+    echo "  busy:         $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.busy // 0')"
+    echo "  provisioning: $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.provisioning // 0')"
+    echo "  uncertain:    $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].counts.uncertain // 0')"
+    echo "  saturated:    $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].saturated // false')"
+    echo "  github_ok:    $(echo "$plan" | jq -r --arg id "$id" '.pools[$id].github_ok // false')"
+    echo "  provision:    $(echo "$plan" | jq -r --arg id "$id" '.provision[$id] // 0')"
+    echo "  guests:"
+    local name st base_id serial overlay any=0
+    for name in $(list_pool_domains "$id"); do
+      any=1
+      st=$(echo "$plan" | jq -r --arg id "$id" --arg n "$name" '.pools[$id].classify[$n] // "unknown"')
+      base_id=$(read_guest_var "$name" BASE_ID)
+      serial=$(read_guest_var "$name" SERIAL_LOG)
+      overlay=$(read_guest_var "$name" OVERLAY)
+      [[ -n "$serial" ]] || serial="$DATA_DIR/logs/${name}.serial.log"
+      [[ -n "$overlay" ]] || overlay="$DATA_DIR/overlays/${name}.qcow2"
+      printf '    %-40s  %-14s  base=%s\n' "$name" "$st" "${base_id:-unknown}"
+      printf '        overlay=%s\n' "$overlay"
+      printf '        serial=%s\n' "$serial"
+    done
+    if [[ "$any" -eq 0 ]]; then
+      echo "    (none)"
+    fi
   done
-  if [[ "$any" -eq 0 ]]; then
-    echo "  (none)"
-  fi
-  local cands
-  cands=$(list_candidate_domains)
+  local cands="" cand_pfx
+  for cand_pfx in $(all_cand_prefixes); do
+    cands+=$(list_prefixed_domains "$cand_pfx")
+    cands+=$'\n'
+  done
+  cands=$(echo "$cands" | sed '/^$/d' || true)
   if [[ -n "$cands" ]]; then
     echo
-    echo "candidates (ignored by production pool):"
+    echo "candidates (ignored by production pools):"
+    local name
     for name in $cands; do
       echo "  $name  libvirt=$(virsh domstate "$name" 2>/dev/null | tr -d '[:space:]')"
       echo "      serial=$DATA_DIR/logs/${name}.serial.log"
@@ -967,33 +1237,47 @@ validate_candidate() {
   shift || true
   local timeout=240
   local gh_repo=""
+  local pool_id="ci"
+  local allow_overcommit=0
   local probe_urls=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout)
-        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]"; return 2; }
+        ;;
+      --pool)
+        pool_id="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] ..."; return 2; }
         ;;
       --github-repo)
-        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]"; return 2; }
         ;;
       --probe-url)
-        [[ -n "${2:-}" ]] || { echo "usage: validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        [[ -n "${2:-}" ]] || { echo "usage: validate-candidate <qcow2> [--probe-url URL]"; return 2; }
         probe_urls+=("$2")
         shift 2
         ;;
+      --allow-capacity-overcommit)
+        allow_overcommit=1
+        shift
+        ;;
       *)
         echo "unknown option: $1"
-        echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"
+        echo "usage: ci-runnerctl validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]... [--allow-capacity-overcommit]"
         return 2
         ;;
     esac
   done
   [[ -n "$qcow" && -f "$qcow" ]] || {
-    echo "usage: ci-runnerctl validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"
+    echo "usage: ci-runnerctl validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"
     return 2
   }
+  pool_json "$pool_id" >/dev/null || { echo "FAIL: unknown pool id: $pool_id"; return 2; }
+  local cand_prefix label mem_mib vcpus
+  cand_prefix=$(pool_field "$pool_id" candidate_prefix)
+  label=$(pool_field "$pool_id" runner_label)
+  mem_mib=$(pool_field "$pool_id" guest_memory_mib)
+  vcpus=$(pool_field "$pool_id" guest_vcpus)
   qcow=$(readlink -f "$qcow")
-  # CLI --probe-url overrides configured validationUrls for this run; otherwise use defaults.
   if [[ ${#probe_urls[@]} -gt 0 ]]; then
     PROBE_URLS_OVERRIDE="${probe_urls[*]}"
   else
@@ -1001,14 +1285,11 @@ validate_candidate() {
   fi
   export PROBE_URLS_OVERRIDE
 
-  # Snapshot production guests so we can prove they were undisturbed.
-  local before_prod before_spare
-  before_prod=$(list_ci_domains | sort | tr '\n' ' ')
-  before_spare=$(list_ci_domains | head -1 || true)
+  local before_prod
+  before_prod=$(list_all_prod_domains | sort | tr '\n' ' ')
 
   local mode="dummy" rc=1 serial
-  # Globals for EXIT trap: bash may unset function `local`s before the trap runs.
-  _CI_CANDIDATE_NAME="${CANDIDATE_PREFIX}$(date +%Y%m%d%H%M%S)-$RANDOM"
+  _CI_CANDIDATE_NAME="${cand_prefix}$(date +%Y%m%d%H%M%S)-$RANDOM"
   _CI_CANDIDATE_SERIAL="$DATA_DIR/logs/${_CI_CANDIDATE_NAME}.serial.log"
   _CI_CANDIDATE_BEFORE="$before_prod"
   serial="$_CI_CANDIDATE_SERIAL"
@@ -1022,7 +1303,7 @@ validate_candidate() {
       echo "  inspect: sudo sed 's/\\x1b\\[[0-9;]*m//g' $_CI_CANDIDATE_SERIAL | tail -n 80"
     fi
     local after_prod
-    after_prod=$(list_ci_domains | sort | tr '\n' ' ')
+    after_prod=$(list_all_prod_domains | sort | tr '\n' ' ')
     echo "production domains before: ${_CI_CANDIDATE_BEFORE:-"(none)"}"
     echo "production domains after : ${after_prod:-"(none)"}"
     if [[ "${_CI_CANDIDATE_BEFORE:-}" != "$after_prod" ]]; then
@@ -1035,7 +1316,16 @@ validate_candidate() {
   }
   trap cleanup_on_exit EXIT
 
-  log "validate-candidate: qcow=$qcow name=$_CI_CANDIDATE_NAME"
+  log "validate-candidate: qcow=$qcow pool=$pool_id name=$_CI_CANDIDATE_NAME"
+
+  # Physical safety: candidates are outside production reconciliation but still
+  # consume RAM/vCPU. Refuse by default when production+candidates already at
+  # hostMaxGuests. Runs under the same flock as provision/reconcile.
+  if ! admit_candidate_or_refuse "$allow_overcommit"; then
+    _CI_CANDIDATE_NAME=""
+    trap - EXIT
+    return 1
+  fi
 
   if [[ -n "$gh_repo" ]]; then
     mode="runner"
@@ -1046,20 +1336,16 @@ validate_candidate() {
       echo "FAIL: --github-repo must be OWNER/REPO"
       return 2
     fi
-    # Separate auth from the production GitHub App: prefer env override, else `gh`.
-    # Under sudo, prefer the invoking user's gh auth (root usually has none).
     if [[ -n "${CI_RUNNER_REG_TOKEN:-}" ]]; then
       token="$CI_RUNNER_REG_TOKEN"
     elif [[ -n "${SUDO_USER:-}" ]] && command -v gh >/dev/null 2>&1; then
       token=$(sudo -u "$SUDO_USER" gh api -X POST "/repos/${owner}/${repo}/actions/runners/registration-token" -q .token) || {
         echo "FAIL: could not mint registration token via gh (as $SUDO_USER) for $owner/$repo"
-        echo "      Set CI_RUNNER_REG_TOKEN or authenticate gh with admin on that repo."
         return 1
       }
     elif command -v gh >/dev/null 2>&1; then
       token=$(gh api -X POST "/repos/${owner}/${repo}/actions/runners/registration-token" -q .token) || {
         echo "FAIL: could not mint registration token via gh for $owner/$repo"
-        echo "      Set CI_RUNNER_REG_TOKEN or authenticate gh with admin on that repo."
         return 1
       }
     else
@@ -1073,6 +1359,7 @@ validate_candidate() {
       echo "UPDATED_AT=$(date -Is)"
       echo "CREATED_AT_UNIX=$created"
       echo "MODE=runner"
+      echo "POOL_ID=$pool_id"
       echo "VALIDATION_REPO=$owner/$repo"
       base_identity "$qcow"
       echo "SERIAL_LOG=$serial"
@@ -1080,15 +1367,17 @@ validate_candidate() {
     } >"$(guest_state_path "$name")"
     overlay=$(create_overlay_from "$name" "$qcow")
     repo_url="https://github.com/${owner}/${repo}"
+    RUNNER_LABELS_OVERRIDE="${label},self-hosted,Linux,X64"
+    export RUNNER_LABELS_OVERRIDE
     seed_iso=$(make_seed_iso "$name" runner "$repo_url" "$token")
-    unset token CI_RUNNER_REG_TOKEN
-    if ! define_and_start "$name" "$overlay" "$seed_iso"; then
+    unset token CI_RUNNER_REG_TOKEN RUNNER_LABELS_OVERRIDE
+    if ! define_and_start "$name" "$overlay" "$seed_iso" "$mem_mib" "$vcpus"; then
       echo "FAIL: candidate guest failed to start"
       return 1
     fi
     echo "candidate runner started: $name"
     echo "serial: $serial"
-    echo "Dispatch a workflow on $owner/$repo targeting label $LABEL, then wait for poweroff."
+    echo "Dispatch a workflow on $owner/$repo targeting label $label, then wait for poweroff."
     echo "This command will wait up to ${timeout}s for the guest to shut down."
     if wait_guest_poweroff "$name" "$timeout"; then
       echo "candidate powered off"
@@ -1105,7 +1394,6 @@ validate_candidate() {
       rc=1
     fi
   else
-    # Dummy isolation validation (default).
     local name="$_CI_CANDIDATE_NAME"
     local created overlay seed_iso
     created=$(date +%s)
@@ -1114,13 +1402,14 @@ validate_candidate() {
       echo "UPDATED_AT=$(date -Is)"
       echo "CREATED_AT_UNIX=$created"
       echo "MODE=dummy"
+      echo "POOL_ID=$pool_id"
       base_identity "$qcow"
       echo "SERIAL_LOG=$serial"
       echo "OVERLAY=$DATA_DIR/overlays/${name}.qcow2"
     } >"$(guest_state_path "$name")"
     overlay=$(create_overlay_from "$name" "$qcow")
     seed_iso=$(make_seed_iso "$name" dummy)
-    if ! define_and_start "$name" "$overlay" "$seed_iso"; then
+    if ! define_and_start "$name" "$overlay" "$seed_iso" "$mem_mib" "$vcpus"; then
       echo "FAIL: candidate guest failed to start"
       return 1
     fi
@@ -1138,6 +1427,9 @@ validate_candidate() {
       "host SSH not reachable as expected" \
       "host HTTP port 80 not reachable as expected" \
       "AdGuard UI not reachable as expected" \
+      "gh ok:" \
+      "git ok" \
+      "no host docker/libvirt sockets visible" \
       "dummy workload complete"
     do
       if ! grep -qF "$needle" "$serial" 2>/dev/null; then
@@ -1154,6 +1446,14 @@ validate_candidate() {
         fi
       done
     fi
+    if [[ -n "${CURSOR_CLI_VERSION:-}" ]]; then
+      for needle in "Cursor CLI help ok" "Cursor CLI version:"; do
+        if ! grep -qF "$needle" "$serial" 2>/dev/null; then
+          echo "FAIL: serial missing Cursor marker: $needle"
+          missing=1
+        fi
+      done
+    fi
     if [[ "$missing" -ne 0 ]]; then
       echo "FAIL: dummy validation markers incomplete"
       rc=1
@@ -1163,7 +1463,6 @@ validate_candidate() {
     fi
   fi
 
-  # Explicit cleanup before trap (destroy is idempotent).
   cleanup_candidate "${_CI_CANDIDATE_NAME:-}"
   _CI_CANDIDATE_NAME=""
   trap - EXIT
@@ -1172,16 +1471,13 @@ validate_candidate() {
     echo "  inspect: sudo sed 's/\\x1b\\[[0-9;]*m//g' $serial | tail -n 80"
   fi
   local after_prod
-  after_prod=$(list_ci_domains | sort | tr '\n' ' ')
+  after_prod=$(list_all_prod_domains | sort | tr '\n' ' ')
   echo "production domains before: ${before_prod:-"(none)"}"
   echo "production domains after : ${after_prod:-"(none)"}"
   if [[ "$before_prod" == "$after_prod" ]]; then
     echo "production spare undisturbed: yes"
   else
     echo "WARNING: production domain set changed during candidate validation"
-  fi
-  if [[ -n "$(list_candidate_domains)" ]]; then
-    echo "WARNING: candidate domains still present: $(list_candidate_domains | tr '\n' ' ')"
   fi
   return "$rc"
 }
@@ -1222,11 +1518,12 @@ case "$cmd" in
     echo "  sudo ci-runnerctl recycle-idle"
     ;;
   recycle-idle)
-    with_lock recycle_idle
+    with_lock recycle_idle "${2:-}"
     ;;
   build-hint)
     echo "Build with: nix build /home/toka/nixosconfig#ci-runner-guest-image -L"
     echo "Then: sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2"
+    echo "      sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 --pool agent"
     echo "Then: sudo ci-runnerctl install-base result/ci-runner-base.qcow2"
     echo "Then: sudo ci-runnerctl recycle-idle"
     ;;
@@ -1243,10 +1540,11 @@ case "$cmd" in
     github_check
     ;;
   provision)
-    with_lock provision_one runner
+    pool_id="${2:-ci}"
+    with_lock provision_one runner "$pool_id"
     ;;
   dummy)
-    name=$(with_lock provision_one dummy) || exit $?
+    name=$(with_lock provision_one dummy ci) || exit $?
     name=$(echo "$name" | tail -n1 | tr -d '[:space:]')
     [[ -n "$name" ]] || { echo "dummy provision failed"; exit 1; }
     wait_dummy_and_destroy "$name" "${2:-240}"
@@ -1258,14 +1556,15 @@ case "$cmd" in
   destroy)
     name="${2:-}"
     [[ -n "$name" ]] || { echo "usage: ci-runnerctl destroy <domain>"; exit 2; }
-    case "$name" in
-      "${PREFIX}"*|"${CANDIDATE_PREFIX}"*) with_lock destroy_guest "$name" ;;
-      *) echo "refusing to destroy non-managed domain: $name"; exit 2 ;;
-    esac
+    if is_managed_domain "$name"; then
+      with_lock destroy_guest "$name"
+    else
+      echo "refusing to destroy non-managed domain: $name"; exit 2
+    fi
     write_metrics
     ;;
   destroy-all)
-    # Production only; never touches ci-candidate-*.
+    # Production only; never touches candidate prefixes.
     with_lock reap_orphans boot
     ;;
   metrics)
@@ -1281,15 +1580,15 @@ case "$cmd" in
 usage: ci-runnerctl <command>
   status
   install-base <qcow2>
-  recycle-idle
+  recycle-idle [pool_id]
   build-hint
   reap
   reap-boot
   reconcile
   github-check
-  provision
+  provision [pool_id]
   dummy [timeout_seconds]
-  validate-candidate <qcow2> [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]...
+  validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]... [--allow-capacity-overcommit]
   destroy <domain>
   destroy-all
   metrics

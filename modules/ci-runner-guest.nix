@@ -119,6 +119,47 @@ let
           exit 2
         fi
         log "AdGuard UI not reachable as expected"
+        # Platform tooling expected on agent (and CI) guests.
+        if ! command -v gh >/dev/null 2>&1; then
+          log "ERROR: gh (GitHub CLI) missing from PATH"
+          exit 2
+        fi
+        log "gh ok: $(${pkgs.gh}/bin/gh --version | head -n1)"
+        if ! command -v git >/dev/null 2>&1; then
+          log "ERROR: git missing from PATH"
+          exit 2
+        fi
+        log "git ok"
+        # Optional Cursor CLI pinned install (workflow-owned version via seed).
+        if [[ -n "''${CURSOR_CLI_VERSION:-}" ]]; then
+          arch=$(uname -m)
+          case "$arch" in
+            x86_64|amd64) arch=x64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) log "ERROR: unsupported arch $arch"; exit 2 ;;
+          esac
+          ver="''${CURSOR_CLI_VERSION}"
+          dir=/root/.local/share/cursor-agent/versions/"$ver"
+          mkdir -p "$dir" /root/.local/bin
+          url="https://downloads.cursor.com/lab/''${ver}/linux/''${arch}/agent-cli-package.tar.gz"
+          log "Cursor CLI pinned install $url"
+          ${pkgs.curl}/bin/curl -fsSL "$url" | ${pkgs.gnutar}/bin/tar --strip-components=1 -xz -C "$dir"
+          ln -sfn "$dir/cursor-agent" /root/.local/bin/agent
+          export HOME=/root
+          export PATH="/root/.local/bin:$PATH"
+          log "Cursor CLI version: $(/root/.local/bin/agent --version)"
+          /root/.local/bin/agent --help >/dev/null
+          log "Cursor CLI help ok"
+        fi
+        # Host passthrough sockets must not appear. Guest-local rootful Podman may
+        # create /run/podman/podman.sock inside the disposable VM — that is expected.
+        for sock in /var/run/docker.sock /run/docker.sock /var/run/libvirt/libvirt-sock /run/libvirt/libvirt-sock; do
+          if [[ -e "$sock" ]]; then
+            log "ERROR: host socket visible in guest: $sock"
+            exit 2
+          fi
+        done
+        log "no host docker/libvirt sockets visible"
         log "dummy workload complete"
         ;;
       runner)
@@ -220,6 +261,7 @@ in
 
   environment.systemPackages = with pkgs; [
     git
+    gh # GitHub CLI for agent workflows (PR/branch ops); also useful in CI smoke
     cacert
     curl
     wget
@@ -353,6 +395,7 @@ in
       bash
       curl
       git
+      gh
       jq
       github-runner
       host

@@ -223,6 +223,13 @@ class TestGuestRunnerPath(unittest.TestCase):
             f"expected procps on runner PATH for free/ps; got: {self.path}",
         )
 
+    def test_gh_on_runner_path(self):
+        joined = " ".join(self.path).lower()
+        self.assertTrue(
+            "gh" in joined or "cli" in joined,
+            f"expected GitHub CLI (gh) on runner PATH for agent workflows; got: {self.path}",
+        )
+
     def test_podman_and_compose_on_runner_path(self):
         joined = " ".join(self.path).lower()
         self.assertIn("podman", joined)
@@ -280,6 +287,15 @@ class TestE2EFixtureContracts(unittest.TestCase):
         self.assertIn("read_memory_peak", text)
         self.assertIn('if [[ "$VOLUME_PROOF_DONE" -eq 0 ]]; then', text)
         self.assertNotRegex(text, r"\bCOMPOSE_STARTED\b")
+
+
+    def test_cursor_cli_smoke_pins_version_and_avoids_curl_bash(self):
+        text = self._read("cursor-cli-smoke.sh")
+        self.assertIn("CURSOR_CLI_VERSION", text)
+        self.assertIn("downloads.cursor.com/lab/", text)
+        self.assertIn("agent-cli-package.tar.gz", text)
+        self.assertNotIn("curl https://cursor.com/install", text)
+        self.assertIn("agent --version", text)
 
     def test_failure_cleanup_smoke_exercises_exit_paths(self):
         text = self._read("podman-failure-cleanup-smoke.sh")

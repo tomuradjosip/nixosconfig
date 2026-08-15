@@ -22,6 +22,26 @@
   githubInstallationId,
   githubPrivateKeyFile,
   textfileDir,
+  # Multi-pool
+  hostMaxGuests ? maxGuests,
+  pools ? [
+    {
+      id = "ci";
+      enable = true;
+      prefix = domainPrefix;
+      candidate_prefix = candidatePrefix;
+      runner_label = runnerLabel;
+      desired_idle = desiredIdleCapacity;
+      max_guests = maxGuests;
+      reserved_host_slots = 0;
+      priority = 100;
+      guest_memory_mib = guestMemoryMiB;
+      guest_vcpus = guestVcpus;
+      github_enable = githubEnable;
+      github_owner = githubOwner;
+      github_repo = githubRepo;
+    }
+  ],
 }:
 
 let
@@ -67,6 +87,11 @@ let
     + builtins.readFile ./ci-runner-pool.py
   );
 
+  poolsJson = pkgs.writeText "ci-runner-pools.json" (builtins.toJSON {
+    host_max_guests = hostMaxGuests;
+    pools = pools;
+  });
+
   binPath = lib.makeBinPath [
     pkgs.coreutils
     pkgs.util-linux
@@ -98,6 +123,7 @@ let
       --subst-var-by runnerVersion ${lib.escapeShellArg runnerVersion} \
       --subst-var-by desiredIdleCapacity ${lib.escapeShellArg (toString desiredIdleCapacity)} \
       --subst-var-by maxGuests ${lib.escapeShellArg (toString maxGuests)} \
+      --subst-var-by hostMaxGuests ${lib.escapeShellArg (toString hostMaxGuests)} \
       --subst-var-by guestMemoryMiB ${lib.escapeShellArg (toString guestMemoryMiB)} \
       --subst-var-by guestVcpus ${lib.escapeShellArg (toString guestVcpus)} \
       --subst-var-by lanProbeTarget ${lib.escapeShellArg lanProbeTarget} \
@@ -110,6 +136,7 @@ let
       --subst-var-by githubInstallationId ${lib.escapeShellArg githubInstallationId} \
       --subst-var-by githubPrivateKeyFile ${lib.escapeShellArg githubPrivateKeyFile} \
       --subst-var-by textfileDir ${lib.escapeShellArg textfileDir} \
+      --subst-var-by poolsJson ${lib.escapeShellArg "${poolsJson}"} \
       --subst-var-by poolBin ${lib.escapeShellArg poolPlanner} \
       --subst-var-by ghAppTokenBin ${lib.escapeShellArg ghAppToken} \
       --subst-var-by path ${lib.escapeShellArg binPath}

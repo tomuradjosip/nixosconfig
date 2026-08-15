@@ -72,9 +72,8 @@
           candidatePrefix = "ci-candidate-";
           runnerLabel = "nixos-ephemeral-ci";
           desiredIdleCapacity = 1;
-          # Flake package default mirrors the architectural ceiling; the live NixOS
-          # module default is evidence-based (see services.ciRunner.maxGuests).
-          maxGuests = 10;
+          maxGuests = 3;
+          hostMaxGuests = 3;
           guestMemoryMiB = 4096;
           guestVcpus = 2;
           lanProbeTarget = "192.168.10.7";
@@ -87,6 +86,40 @@
           githubInstallationId = "";
           githubPrivateKeyFile = "/persist/etc/secrets/ci-runner/github-app.pem";
           textfileDir = "/var/lib/node_exporter_textfile";
+          pools = [
+            {
+              id = "ci";
+              enable = true;
+              prefix = "ci-ephemeral-";
+              candidate_prefix = "ci-candidate-";
+              runner_label = "nixos-ephemeral-ci";
+              desired_idle = 1;
+              max_guests = 3;
+              reserved_host_slots = 2;
+              priority = 100;
+              guest_memory_mib = 4096;
+              guest_vcpus = 2;
+              github_enable = false;
+              github_owner = "";
+              github_repo = "";
+            }
+            {
+              id = "agent";
+              enable = true;
+              prefix = "agent-ephemeral-";
+              candidate_prefix = "agent-candidate-";
+              runner_label = "nixos-ephemeral-agent";
+              desired_idle = 1;
+              max_guests = 1;
+              reserved_host_slots = 0;
+              priority = 50;
+              guest_memory_mib = 4096;
+              guest_vcpus = 2;
+              github_enable = false;
+              github_owner = "";
+              github_repo = "";
+            }
+          ];
         };
       };
     };

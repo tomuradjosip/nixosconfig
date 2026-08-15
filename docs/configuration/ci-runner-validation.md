@@ -828,13 +828,51 @@ Branch `feat/ephemeral-agent-runners` from `main` @ `421fd217bb5646c5ecaaf4ffe25
 Under `hostMaxGuests=3` and CI `reservedHostSlots=2`, a busy agent occupies at most one
 host slot. Planner unit tests prove CI still receives idle replenishment while an agent is
 busy, and combined occupancy never exceeds the host ceiling. **A long-running agent cannot
-prevent the PR CI pool from obtaining capacity under this model.**
+reduce CI below its protected two-slot floor under this model.** (`priority` allocates new
+slots; it does not preempt an already-running idle agent.)
 
-### Remaining operator steps (post-merge / authorized deploy)
+### Live deployment status (correction pass)
 
-1. `nixos-rebuild switch --impure` (enables agent pool systemd config).
-2. `sudo ci-runnerctl install-base <candidate.qcow2>` then `recycle-idle` (or recycle agent only).
-3. Confirm `ci-runnerctl status` shows both pools; agent idle=1 when host capacity allows.
-4. Optional GitHub smoke: one-job workflow `runs-on: [self-hosted, Linux, X64, nixos-ephemeral-agent]`
-   that runs `fixtures/ci-runner-e2e/cursor-cli-smoke.sh` (no Shopforge agent autonomy).
-5. Shopforge Developer/Reviewer workflows remain **out of scope** for this change.
+Already completed on the live runner host during the initial implementation (2026-08-15):
+
+| Action | Status |
+|--------|--------|
+| `nixos-rebuild switch --impure` | **Done** — multi-pool ctl active; reaper not restarted |
+| `ci-runnerctl install-base` | **Done** — `BASE_ID=bf9b84d105954150` (`ci-runner-base-20260815113359.qcow2`) |
+| Agent idle spare | **Live** — `agent-ephemeral-*` online, label `nixos-ephemeral-agent`, on new base |
+| CI idle spare | **Live** — remained on previous base until optionally recycled |
+| Draft PR | [#2](https://github.com/tomuradjosip/nixosconfig/pull/2) (not merged) |
+
+Changed files in the PR are the full set of modified/added paths on the branch (13 paths in the initial implementation; plus subsequent capacity-guard commits), not a 4-file subset.
+
+### Remaining optional / post-merge actions
+
+1. Optionally `recycle-idle ci` so the CI spare also uses the new base (agent already recycled).
+2. Optional one-job GitHub smoke on `nixos-ephemeral-agent` running `fixtures/ci-runner-e2e/cursor-cli-smoke.sh` (no Shopforge agent autonomy; requires a workflow in a repo that registers agent runners).
+3. Shopforge Developer/Reviewer workflows remain **out of scope**.
+4. Review and merge draft PR #2 when ready.
+
+### Capacity-guard correction (same branch, post-review)
+
+Addressed Controller findings on creation-site `hostMaxGuests` enforcement and candidate
+physical admission (planner alone is insufficient).
+
+| Guard | Behavior |
+|-------|----------|
+| `provision_one` | Under `provision.lock`, calls `admit-production` — refuses on pool max, production host max, or physical max (production + candidates) |
+| `validate-candidate` | Under same lock, calls `admit-candidate` — refuses when physical occupancy ≥ `hostMaxGuests`; optional `--allow-capacity-overcommit` with warning |
+
+**Deterministic:** pool tests **56 PASS** (includes admit-production / admit-candidate cases).
+
+**Live (2026-08-15, occupancy never left above 3):**
+
+| Exercise | Result |
+|----------|--------|
+| `provision agent` with agent already idle | refused (`pool_max`) |
+| `provision ci` at 2 production → 3 | allowed (at ceiling) |
+| `provision ci` at 3 production | refused (`host_max_production`); count stayed 3 |
+| `validate-candidate` at 3 production | refused (`physical_max`); no candidate domain created |
+| Destroy fill guest → occupancy 2 | done |
+| `validate-candidate --pool agent` at occupancy 2 | **PASS** dummy + Verdaccio; production undisturbed; teardown clean |
+
+Final live occupancy after correction validation: 1 CI idle + 1 agent idle (+ HA). No stale candidates.

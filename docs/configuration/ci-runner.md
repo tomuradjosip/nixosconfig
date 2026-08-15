@@ -158,19 +158,38 @@ Independent pools must not each consume a full per-pool max and oversubscribe th
 
 | Option | Live value | Meaning |
 |--------|------------|---------|
-| `hostMaxGuests` | **3** | Hard ceiling on managed production guests across **all** pools |
+| `hostMaxGuests` | **3** | Dual meaning (same number by design): (1) hard ceiling on **production** guests across all pools; (2) default **physical** safety ceiling for any runner-like VM including candidates |
 | CI `maxGuests` | 3 | Per-pool cap (still subject to host ceiling) |
 | CI `desiredIdleCapacity` | 1 | Keep one online idle CI spare when capacity allows |
-| CI `reservedHostSlots` | **2** | Lower-priority pools may not consume capacity that would leave CI below this floor |
-| CI `priority` | 100 | Provisions before agent under contention |
+| CI `reservedHostSlots` | **2** | Lower-priority pools may not *consume capacity that would leave CI below this floor* when allocating **new** guests |
+| CI `priority` | 100 | Higher priority when allocating **new** provisions under host contention |
 | Agent `maxGuests` | 1 | At most one agent guest (Developer/Reviewer are sequential) |
 | Agent `desiredIdleCapacity` | 1 | One always-idle agent spare (polling demand model) |
-| Agent `priority` | 50 | Yields to CI when host capacity is contested |
+| Agent `priority` | 50 | Lower priority for **new** provisions under host contention |
 | Guest RAM / vCPU (both pools) | 4096 MiB / 2 | Same disposable image sizing |
 
-**CI starvation answer:** with `reservedHostSlots = 2` and `hostMaxGuests = 3`, a busy agent occupies at most one host slot. At least two host slots remain available for CI. A long-running Developer/Reviewer agent therefore **cannot** prevent PR CI from obtaining capacity under this model. When the host is already full of CI guests (3), the agent waits — that is intentional (CI priority), not CI starvation.
+**`priority` is not preemption.** It only affects how free host slots are assigned to *new* provisions. An already-running idle agent is **not** automatically destroyed because CI wants a third guest. The CI floor guarantee is: under the reservation model, the agent pool cannot *consume* capacity required to preserve two host slots for CI (agent max effective occupancy is `hostMaxGuests − reservedHostSlots = 1`). That is sufficient for Developer → CI → Reviewer.
+
+**Creation-site guards (defense in depth):** `ci-runnerctl provision` and reconcile both call `provision_one`, which refuses under the shared `flock` if creating one more production guest would exceed per-pool `maxGuests`, production `hostMaxGuests`, or the physical ceiling (production + candidates). Planner arithmetic alone is not trusted.
+
+**CI starvation answer:** with `reservedHostSlots = 2` and `hostMaxGuests = 3`, a busy agent occupies at most one host slot. At least two host slots remain available for CI. A long-running Developer/Reviewer agent therefore **cannot** reduce CI below its protected two-slot floor under this model. When the host is already full of CI guests (3), the agent waits — that is intentional (CI priority for *new* slots), not CI starvation.
 
 **Live host evidence (2026-08-15):** Intel i3-14100 (8 threads), 62 GiB RAM, ~12–13 GiB MemAvailable with swap 2 GiB often full while 3×4 GiB CI guests + HA (4 GiB) + dense Podman run. Raising `hostMaxGuests` above 3 is unsafe without right-sizing. Do not increase capacity merely to avoid this design.
+
+### Candidate physical admission
+
+Candidates (`*-candidate-*`) are excluded from production reconciliation (correct for lifecycle ownership) but still consume RAM/vCPU. By default `validate-candidate` **refuses** to start if `production + existing candidates + 1 > hostMaxGuests`.
+
+```bash
+# Fail-closed (default)
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 --pool agent
+
+# Explicit operator bypass (conspicuous warning; not for normal automation)
+sudo ci-runnerctl validate-candidate result/ci-runner-base.qcow2 --pool agent \
+  --allow-capacity-overcommit
+```
+
+Candidate admission and production provision share `provision.lock`, so two concurrent operations cannot both observe one free slot and overcommit.
 
 ### Idle / demand strategy (agent)
 
@@ -681,7 +700,7 @@ sudo ci-runnerctl reap-boot
 sudo ci-runnerctl reconcile
 sudo ci-runnerctl provision [ci|agent]
 sudo ci-runnerctl dummy
-sudo ci-runnerctl validate-candidate <qcow2> [--pool ci|agent] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]
+sudo ci-runnerctl validate-candidate <qcow2> [--pool ci|agent] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]
 sudo ci-runnerctl install-base <qcow2>
 sudo ci-runnerctl recycle-idle [ci|agent]
 sudo ci-runnerctl build-hint

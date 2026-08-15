@@ -540,5 +540,92 @@ class TestAgentLifecyclePlanning(unittest.TestCase):
         self.assertNotIn(AGENT_PREFIX + "x", p["destroy"])
         self.assertNotIn(AGENT_PREFIX + "x", p["classify"])
 
+
+class TestAdmitProductionGuard(unittest.TestCase):
+    """Final creation-site guard: pool max + host max + physical (incl. candidates)."""
+
+    PROD = ["ci-ephemeral-", "agent-ephemeral-"]
+    CAND = ["ci-candidate-", "agent-candidate-"]
+
+    def _admit(self, domains, pool_prefix=PREFIX, pool_max=3, host_max=3):
+        return pool.admit_production_guest(
+            host_max, pool_max, self.PROD, self.CAND, pool_prefix, domains)
+
+    def test_allows_when_under_all_ceilings(self):
+        d = self._admit([dom(PREFIX + "a"), dom(PREFIX + "b")])
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["reason"], "ok")
+        self.assertEqual(d["production_total"], 2)
+        self.assertEqual(d["physical_total"], 2)
+
+    def test_blocks_at_pool_max_even_if_host_has_room(self):
+        # Agent pool_max=1 already occupied; host has room (1 of 3).
+        d = self._admit(
+            [dom(AGENT_PREFIX + "a")],
+            pool_prefix=AGENT_PREFIX, pool_max=1, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "pool_max")
+
+    def test_blocks_at_host_max_even_if_pool_has_room(self):
+        # CI pool_max=3, already 2 CI + 1 agent = host full; CI still < pool max.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "host_max_production")
+        self.assertEqual(d["pool_total"], 2)
+        self.assertEqual(d["production_total"], 3)
+
+    def test_direct_ci_provision_cannot_bypass_host_ceiling(self):
+        # The unsafe example from review: 2 CI + 1 agent, then `provision ci`.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+
+    def test_candidate_occupying_final_slot_blocks_production(self):
+        # 2 production + 1 candidate = physical full; production must not create 4th.
+        d = self._admit(
+            [dom(PREFIX + "a"), dom(AGENT_PREFIX + "x"), dom(CAND + "c")],
+            pool_prefix=PREFIX, pool_max=3, host_max=3)
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "physical_max")
+        self.assertEqual(d["production_total"], 2)
+        self.assertEqual(d["physical_total"], 3)
+
+
+class TestAdmitCandidateGuard(unittest.TestCase):
+    PROD = ["ci-ephemeral-", "agent-ephemeral-"]
+    CAND = ["ci-candidate-", "agent-candidate-"]
+
+    def _admit(self, domains, physical_max=3, overcommit=False):
+        return pool.admit_candidate_guest(
+            physical_max, self.PROD, self.CAND, domains, allow_overcommit=overcommit)
+
+    def test_two_production_zero_candidate_permits_one(self):
+        d = self._admit([dom(PREFIX + "a"), dom(AGENT_PREFIX + "x")])
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["physical_total"], 2)
+
+    def test_three_production_denies_candidate(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")])
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["reason"], "physical_max")
+
+    def test_two_production_one_candidate_denies_another(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(AGENT_PREFIX + "x"), dom(CAND + "c")])
+        self.assertFalse(d["allowed"])
+        self.assertEqual(d["candidate_total"], 1)
+        self.assertEqual(d["physical_total"], 3)
+
+    def test_overcommit_override_allows_with_reason(self):
+        d = self._admit([
+            dom(PREFIX + "a"), dom(PREFIX + "b"), dom(AGENT_PREFIX + "x")],
+            overcommit=True)
+        self.assertTrue(d["allowed"])
+        self.assertEqual(d["reason"], "overcommit_override")
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

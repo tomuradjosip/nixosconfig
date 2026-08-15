@@ -369,41 +369,176 @@ def classify_multi_pool(host_config, pools, domains, runners_by_pool, github_ok_
     }
 
 
-def _main(argv):
-    """CLI: read a snapshot JSON on stdin, print the plan JSON on stdout.
+def count_prefix_guests(domains, prefixes):
+    """Count domains whose names start with any of the given prefixes."""
+    prefixes = [p for p in prefixes if p]
+    total = 0
+    for dom in domains:
+        name = dom.get("name") or ""
+        if any(name.startswith(p) for p in prefixes):
+            total += 1
+    return total
 
-    Single-pool snapshot schema (backward compatible):
-      {"config": {...}, "now": <epoch>, "github_ok": bool,
-       "domains": [{"name","libvirt_state","created_at"}...],
-       "github_runners": [{"name","status","busy"}...]}
 
-    Multi-pool snapshot schema:
-      {"mode": "multi", "host": {"host_max_guests": N}, "now": ...,
-       "pools": [pool configs...],
-       "domains": [...],
-       "runners_by_pool": {pool_id: [...]},
-       "github_ok_by_pool": {pool_id: bool}}
+def admit_production_guest(host_max, pool_max, production_prefixes, candidate_prefixes,
+                           pool_prefix, domains):
+    """Decide whether one more *production* guest may be created.
+
+    Enforces, in order:
+      1. per-pool maxGuests for pool_prefix
+      2. production hostMaxGuests across all production prefixes
+      3. physical safety ceiling (= hostMaxGuests) including candidates
+
+    `hostMaxGuests` is intentionally both the production pool ceiling and the
+    default physical runner-VM safety ceiling (candidates consume real RAM).
+
+    Returns dict: {allowed: bool, reason: str, pool_total, production_total,
+                   physical_total, host_max, pool_max}
     """
-    if len(argv) < 2 or argv[1] != "plan":
-        sys.stderr.write("usage: ci-runner-pool plan < snapshot.json\n")
+    pool_total = count_prefix_guests(domains, [pool_prefix])
+    production_total = count_prefix_guests(domains, production_prefixes)
+    physical_total = count_prefix_guests(
+        domains, list(production_prefixes) + list(candidate_prefixes))
+
+    if pool_total >= pool_max:
+        return {
+            "allowed": False,
+            "reason": "pool_max",
+            "pool_total": pool_total,
+            "production_total": production_total,
+            "physical_total": physical_total,
+            "host_max": host_max,
+            "pool_max": pool_max,
+        }
+    if production_total >= host_max:
+        return {
+            "allowed": False,
+            "reason": "host_max_production",
+            "pool_total": pool_total,
+            "production_total": production_total,
+            "physical_total": physical_total,
+            "host_max": host_max,
+            "pool_max": pool_max,
+        }
+    if physical_total >= host_max:
+        return {
+            "allowed": False,
+            "reason": "physical_max",
+            "pool_total": pool_total,
+            "production_total": production_total,
+            "physical_total": physical_total,
+            "host_max": host_max,
+            "pool_max": pool_max,
+        }
+    return {
+        "allowed": True,
+        "reason": "ok",
+        "pool_total": pool_total,
+        "production_total": production_total,
+        "physical_total": physical_total,
+        "host_max": host_max,
+        "pool_max": pool_max,
+    }
+
+
+def admit_candidate_guest(physical_max, production_prefixes, candidate_prefixes, domains,
+                          allow_overcommit=False):
+    """Decide whether one more candidate guest may be started.
+
+    Candidates are excluded from production reconciliation but still consume
+    physical RAM/vCPU. By default they share the same physical ceiling as
+    `hostMaxGuests`. `allow_overcommit=True` bypasses the guard (operator-only).
+    """
+    production_total = count_prefix_guests(domains, production_prefixes)
+    candidate_total = count_prefix_guests(domains, candidate_prefixes)
+    physical_total = production_total + candidate_total
+
+    if allow_overcommit:
+        return {
+            "allowed": True,
+            "reason": "overcommit_override",
+            "production_total": production_total,
+            "candidate_total": candidate_total,
+            "physical_total": physical_total,
+            "physical_max": physical_max,
+        }
+    if physical_total >= physical_max:
+        return {
+            "allowed": False,
+            "reason": "physical_max",
+            "production_total": production_total,
+            "candidate_total": candidate_total,
+            "physical_total": physical_total,
+            "physical_max": physical_max,
+        }
+    return {
+        "allowed": True,
+        "reason": "ok",
+        "production_total": production_total,
+        "candidate_total": candidate_total,
+        "physical_total": physical_total,
+        "physical_max": physical_max,
+    }
+
+
+def _main(argv):
+    """CLI: read a snapshot JSON on stdin, print the plan/admit JSON on stdout.
+
+    Commands:
+      plan              — single- or multi-pool reconcile plan
+      admit-production  — final guard before creating a production guest
+      admit-candidate   — final guard before starting a candidate guest
+
+    admit-production snapshot:
+      {"host_max_guests": N, "pool_max_guests": M, "pool_prefix": "...",
+       "production_prefixes": [...], "candidate_prefixes": [...],
+       "domains": [{"name": ...}, ...]}
+
+    admit-candidate snapshot:
+      {"physical_max_guests": N, "allow_overcommit": bool,
+       "production_prefixes": [...], "candidate_prefixes": [...],
+       "domains": [{"name": ...}, ...]}
+    """
+    if len(argv) < 2 or argv[1] not in ("plan", "admit-production", "admit-candidate"):
+        sys.stderr.write(
+            "usage: ci-runner-pool plan|admit-production|admit-candidate < snapshot.json\n")
         return 2
     snap = json.load(sys.stdin)
-    if snap.get("mode") == "multi":
-        plan = classify_multi_pool(
-            snap["host"],
-            snap["pools"],
+    cmd = argv[1]
+    if cmd == "plan":
+        if snap.get("mode") == "multi":
+            plan = classify_multi_pool(
+                snap["host"],
+                snap["pools"],
+                snap.get("domains", []),
+                snap.get("runners_by_pool", {}),
+                snap.get("github_ok_by_pool", {}),
+                snap.get("now", 0),
+            )
+        else:
+            plan = classify_domains(
+                snap["config"],
+                snap.get("domains", []),
+                snap.get("github_runners", []),
+                snap.get("github_ok", False),
+                snap.get("now", 0),
+            )
+    elif cmd == "admit-production":
+        plan = admit_production_guest(
+            int(snap["host_max_guests"]),
+            int(snap["pool_max_guests"]),
+            snap.get("production_prefixes", []),
+            snap.get("candidate_prefixes", []),
+            snap["pool_prefix"],
             snap.get("domains", []),
-            snap.get("runners_by_pool", {}),
-            snap.get("github_ok_by_pool", {}),
-            snap.get("now", 0),
         )
     else:
-        plan = classify_domains(
-            snap["config"],
+        plan = admit_candidate_guest(
+            int(snap["physical_max_guests"]),
+            snap.get("production_prefixes", []),
+            snap.get("candidate_prefixes", []),
             snap.get("domains", []),
-            snap.get("github_runners", []),
-            snap.get("github_ok", False),
-            snap.get("now", 0),
+            allow_overcommit=bool(snap.get("allow_overcommit", False)),
         )
     json.dump(plan, sys.stdout)
     sys.stdout.write("\n")

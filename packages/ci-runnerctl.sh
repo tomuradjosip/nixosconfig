@@ -103,6 +103,89 @@ list_all_prod_domains() {
   done
 }
 
+list_all_candidate_domains() {
+  local pfx
+  for pfx in $(all_cand_prefixes); do
+    [[ -n "$pfx" ]] || continue
+    list_prefixed_domains "$pfx"
+  done
+}
+
+domain_names_json() {
+  # Emit JSON array of {name} objects from newline-separated domain names on stdin.
+  jq -Rnc '[inputs | select(length>0) | {name: .}]'
+}
+
+admit_production_or_refuse() {
+  # Final host/pool capacity guard before creating a production guest. Must run under flock.
+  local pool_id="$1"
+  local pfx maxg domains snap decision reason
+  pfx=$(pool_field "$pool_id" prefix)
+  maxg=$(pool_field "$pool_id" max_guests)
+  domains=$( {
+    list_all_prod_domains
+    list_all_candidate_domains
+  } | domain_names_json )
+  snap=$(jq -nc \
+    --argjson host_max "$HOST_MAX_GUESTS" \
+    --argjson pool_max "$maxg" \
+    --arg pfx "$pfx" \
+    --argjson domains "$domains" \
+    --slurpfile poolsfile "$POOLS_JSON" \
+    '{
+      host_max_guests: $host_max,
+      pool_max_guests: $pool_max,
+      pool_prefix: $pfx,
+      production_prefixes: [$poolsfile[0].pools[].prefix],
+      candidate_prefixes: [$poolsfile[0].pools[].candidate_prefix],
+      domains: $domains
+    }')
+  decision=$(echo "$snap" | "$POOL_BIN" admit-production)
+  if [[ "$(echo "$decision" | jq -r '.allowed')" != "true" ]]; then
+    reason=$(echo "$decision" | jq -r '.reason')
+    log "refusing production provision pool=$pool_id reason=$reason $(echo "$decision" | jq -c '{pool_total,production_total,physical_total,host_max,pool_max}')"
+    return 1
+  fi
+  return 0
+}
+
+admit_candidate_or_refuse() {
+  # Physical safety guard before starting a candidate. Must run under flock.
+  local allow_overcommit="${1:-0}"
+  local domains snap decision reason
+  domains=$( {
+    list_all_prod_domains
+    list_all_candidate_domains
+  } | domain_names_json )
+  snap=$(jq -nc \
+    --argjson physical_max "$HOST_MAX_GUESTS" \
+    --argjson overcommit "$([[ "$allow_overcommit" == "1" ]] && echo true || echo false)" \
+    --argjson domains "$domains" \
+    --slurpfile poolsfile "$POOLS_JSON" \
+    '{
+      physical_max_guests: $physical_max,
+      allow_overcommit: $overcommit,
+      production_prefixes: [$poolsfile[0].pools[].prefix],
+      candidate_prefixes: [$poolsfile[0].pools[].candidate_prefix],
+      domains: $domains
+    }')
+  decision=$(echo "$snap" | "$POOL_BIN" admit-candidate)
+  if [[ "$(echo "$decision" | jq -r '.allowed')" != "true" ]]; then
+    reason=$(echo "$decision" | jq -r '.reason')
+    log "refusing candidate start reason=$reason $(echo "$decision" | jq -c '{production_total,candidate_total,physical_total,physical_max}')"
+    echo "FAIL: candidate would exceed physical guest ceiling (hostMaxGuests=$HOST_MAX_GUESTS includes production + candidates)."
+    echo "      Occupancy: $(echo "$decision" | jq -c '{production_total,candidate_total,physical_total,physical_max}')"
+    echo "      Retry when a slot is free, or pass --allow-capacity-overcommit (explicit, warned bypass)."
+    return 1
+  fi
+  if [[ "$(echo "$decision" | jq -r '.reason')" == "overcommit_override" ]]; then
+    log "WARNING: candidate capacity overcommit override in effect — bypassing physical safety ceiling"
+    echo "WARNING: --allow-capacity-overcommit bypasses the physical guest safety ceiling (hostMaxGuests=$HOST_MAX_GUESTS)."
+    echo "         This can oversubscribe RAM/vCPU on the live host. Do not use for normal automation."
+  fi
+  return 0
+}
+
 ensure_dirs() {
   mkdir -p "$DATA_DIR/base" "$DATA_DIR/overlays" "$DATA_DIR/seeds" "$DATA_DIR/state" \
            "$DATA_DIR/logs" "$GUEST_STATE_DIR"
@@ -907,12 +990,11 @@ provision_one() {
   [[ -f "$base_path" ]] || { log "base image not found: $base_path"; return 1; }
 
   local name_prefix="${name_prefix_override:-$pfx}"
-  # Production prefix: enforce per-pool max (host ceiling enforced by planner).
+  # Production prefix: enforce per-pool max + hostMaxGuests + physical ceiling
+  # (including candidates) at the creation site — not only in the planner.
   if [[ "$name_prefix" == "$pfx" ]]; then
-    count=$(list_prefixed_domains "$pfx" | grep -c . || true)
-    if [[ "$count" -ge "$maxg" ]]; then
-      log "pool=$pool_id max guests reached ($count >= $maxg)"
-      return 0
+    if ! admit_production_or_refuse "$pool_id"; then
+      return 1
     fi
   fi
 
@@ -1156,26 +1238,31 @@ validate_candidate() {
   local timeout=240
   local gh_repo=""
   local pool_id="ci"
+  local allow_overcommit=0
   local probe_urls=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --timeout)
-        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        timeout="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]"; return 2; }
         ;;
       --pool)
         pool_id="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] ..."; return 2; }
         ;;
       --github-repo)
-        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]"; return 2; }
+        gh_repo="${2:-}"; shift 2 || { echo "usage: validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL] [--allow-capacity-overcommit]"; return 2; }
         ;;
       --probe-url)
         [[ -n "${2:-}" ]] || { echo "usage: validate-candidate <qcow2> [--probe-url URL]"; return 2; }
         probe_urls+=("$2")
         shift 2
         ;;
+      --allow-capacity-overcommit)
+        allow_overcommit=1
+        shift
+        ;;
       *)
         echo "unknown option: $1"
-        echo "usage: ci-runnerctl validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]..."
+        echo "usage: ci-runnerctl validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]... [--allow-capacity-overcommit]"
         return 2
         ;;
     esac
@@ -1230,6 +1317,15 @@ validate_candidate() {
   trap cleanup_on_exit EXIT
 
   log "validate-candidate: qcow=$qcow pool=$pool_id name=$_CI_CANDIDATE_NAME"
+
+  # Physical safety: candidates are outside production reconciliation but still
+  # consume RAM/vCPU. Refuse by default when production+candidates already at
+  # hostMaxGuests. Runs under the same flock as provision/reconcile.
+  if ! admit_candidate_or_refuse "$allow_overcommit"; then
+    _CI_CANDIDATE_NAME=""
+    trap - EXIT
+    return 1
+  fi
 
   if [[ -n "$gh_repo" ]]; then
     mode="runner"
@@ -1492,7 +1588,7 @@ usage: ci-runnerctl <command>
   github-check
   provision [pool_id]
   dummy [timeout_seconds]
-  validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]...
+  validate-candidate <qcow2> [--pool ID] [--timeout N] [--github-repo OWNER/REPO] [--probe-url URL]... [--allow-capacity-overcommit]
   destroy <domain>
   destroy-all
   metrics

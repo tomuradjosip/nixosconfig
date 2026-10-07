@@ -19,6 +19,7 @@
       git
       gh
       jq
+      ripgrep
       nixfmt-rfc-style # For formatting nix files
       htop
       pre-commit
